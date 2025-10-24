@@ -1,7 +1,24 @@
 import numpy as np
 from scipy.interpolate import InterpolatedUnivariateSpline as interpolate
-from scipy.misc import derivative
 import inspect
+
+try:
+    from scipy.differentiate import derivative as _derivative
+except:
+    from scipy.misc import derivative as _derivative
+
+def derivative(func, x0, dx=1.0, order=9):
+    """
+    Wrapper for scipy.misc.derivative / scipy.differentiate.derivative
+    compatible across SciPy versions.
+    """
+    try:
+        return _derivative(func, x0, dx=dx, order=order)
+    except:
+        res = _derivative(func, x0, initial_step=dx, order=order)
+        if res["status"] != 0:
+            raise ValueError("failed numeric derivative status={}".format(res["status"]))
+        return res["df"]
 
 def loginterp(x, y, yint = None, side = "both", lorder = 9, rorder = 9, lp = 1, rp = -1,
               ldx = 1e-6, rdx = 1e-6):
