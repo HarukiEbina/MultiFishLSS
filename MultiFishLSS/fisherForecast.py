@@ -1,11 +1,11 @@
 from headers import *
 from twoPoint import *
 from twoPointNoise import *
-# from deprecated.castorina import castorinaBias,castorinaPn
 from multiprocessing import Pool
 from functools import partial
 import os, json
 from os.path import exists
+from scipy.integrate import simpson as simps
 
 
 class fisherForecast(object):
@@ -448,7 +448,7 @@ class fisherForecast(object):
       result = np.zeros(n)
       for i in range(n):
          integrand = (2*l+1)*p_reshaped[i,:]*scipy.special.legendre(l)(mu)
-         result[i] = scipy.integrate.simps(integrand,x=mu)
+         result[i] = simps(integrand,x=mu)
       return result
       
       

@@ -3,9 +3,7 @@ from velocileptors.LPT.cleft_fftw import CLEFT
 from bao_recon.zeldovich_rsd_recon_fftw import Zeldovich_Recon
 from velocileptors.LPT.lpt_rsd_fftw import LPT_RSD
 from scipy.signal import savgol_filter
-# from deprecated.castorina import castorinaBias,castorinaPn
-#from twoPointNoise_new import compute_n
-from scipy.integrate import simps
+from scipy.integrate import simpson as simps
 from math import ceil
 from scipy.interpolate import InterpolatedUnivariateSpline as Spline
 from scipy.special import legendre

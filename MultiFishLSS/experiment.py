@@ -1,6 +1,4 @@
 from headers import *
-import types
-import copy
 from scipy.integrate import quad
 from scipy.optimize import fsolve
 import json

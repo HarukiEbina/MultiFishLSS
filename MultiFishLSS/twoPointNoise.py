@@ -1,8 +1,5 @@
 from headers import *
 from twoPoint import *
-# from deprecated.castorina import castorinaBias,castorinaPn
-import scipy
-from input.reio_hist import Xhi
 from definitions import MFISHLSS_BASE
 
 '''
