@@ -1525,9 +1525,18 @@ class fisherForecast(object):
                   (self.experiment.b[1](z)+f*MU**2.)
          P_L2 = compute_matter_power_spectrum(self,z,linear=True)*\
                   (self.experiment.b[1](z)+f*MU**2.)**2.
-         #
+
          nsamples= len(self.experiment.b)
          npairs  = int(nsamples*(nsamples+1)/2)
+
+         # Linear power spectrum for all pairs of galaxies 
+         Plinears = []
+         for n in range(npairs):
+            s1,s2=self.index2sample(n)
+            Plinears += [compute_matter_power_spectrum(self,z,linear=True)*\
+                          (self.experiment.b[s1](z)+f*MU**2.)*\
+                          (self.experiment.b[s2](z)+f*MU**2.)]
+
          #
          autoidx= np.arange(npairs)
          covmat = compute_covariance_matrix(self,zbin_idx)
@@ -1536,7 +1545,8 @@ class fisherForecast(object):
          # undo the multiplication by dk done in compute_covariance_matrix
          # as it assumes k-spacing of forecast object
          Cinv   = np.einsum('kij,k->kij',Cinv,Deltak/self.dk)
-         signal = np.array([G(z)**2*P_L1,G(z)**2*P_L12,G(z)**2*P_L2])
+         # signal = np.array([G(z)**2*P_L1,G(z)**2*P_L12,G(z)**2*P_L2])
+         signal = np.array([G(z)**2*Plinears[i] for i in range(len(Plinears))])
          #
          constraints = self.compute_wedge(z,kmin=kmin)
          F=np.einsum('c,ac,cab,bc->c',constraints,signal,Cinv,signal)
