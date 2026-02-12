@@ -1505,59 +1505,54 @@ class fisherForecast(object):
       return f
     
     
-   def Nmodes(self,zmin,zmax,nbins,kpar=-1.,kmax=-1,alpha0=-1,alpha2=0,linear=False,halofit=False):
-    
+   def Nmodes(self,k,zbin_idxs=None,Deltak=0.1,kmin=0.001):
+      """Compute the number of modes at k-bin in multi-tracer analysis."""
       def G(z):
-         Sigma2 = self.Sigma2(z)
-         f = self.cosmo.scale_independent_growth_factor_f(z)
+         # The anisotropic "decorrelation" factor.
+         Sigma2    = self.Sigma2(z)
+         f         = self.cosmo.scale_independent_growth_factor_f(z)
          kparallel = self.k*self.mu
-         kperpendicular = self.k*np.sqrt(1.-self.mu**2.)
-         return np.exp(-0.5 * (kperpendicular**2. + kparallel**2. * (1.+f)**2.) * Sigma2)
-      def I1(z):
-         f = self.cosmo.scale_independent_growth_factor_f(z)      
-         K,MU,b = self.k,self.mu,compute_b(self,z)
-         P_L = compute_matter_power_spectrum(self,z,linear=True) * (b+f*MU**2.)**2.
-         P_F = compute_tracer_power_spectrum(self,z,alpha0=alpha0,alpha2=alpha2)
-         if linear: P_F = P_L + 1/compute_n(self,z)
-         if halofit: P_F = compute_matter_power_spectrum(self,z) * (b+f*MU**2.)**2. + 1/compute_n(self,z)
-         integrand = ( G(z)**2 * P_L / P_F )**2. 
-         integrand *= self.compute_wedge(z) 
-         if kpar > 0.: integrand *= (self.k*self.mu > kpar)
-         if kmax > 0.: integrand *= (self.k < kmax)
-         return sum(integrand * self.k**2. * self.dk * self.dmu / (2. * np.pi**2.))
-         # we are dividing by 2 pi^2 (and not 4 pi^2) since we integrate from mu = 0 to 1
-    
-      zedges = np.linspace(zmin,zmax,nbins+1)
-      zs = (zedges[1:]+zedges[:-1])/2.
-      dV = np.array([self.comov_vol(zedges[i],zedges[i+1]) for i in range(nbins)])
-      I = np.array([I1(z) for z in zs])
-      return sum(I*dV) 
-    
-    
-   def Nmodes_fixed_k(self,k,zmin,zmax,nbins,Deltak=0.1):
-    
-      def G(z):
-         Sigma2 = self.Sigma2(z)
-         f = self.cosmo.scale_independent_growth_factor_f(z)
-         kparallel = self.k*self.mu
-         kperpendicular = self.k*np.sqrt(1.-self.mu**2.)
-         return np.exp(-0.5 * (kperpendicular**2. + kparallel**2. * (1.+f)**2.) * Sigma2)
-      def I1(z):
-         f = self.cosmo.scale_independent_growth_factor_f(z)      
-         K,MU,b = self.k,self.mu,compute_b(self,z)
-         P_L = compute_matter_power_spectrum(self,z,linear=True) * (b+f*MU**2.)**2.
-         P_F = compute_tracer_power_spectrum(self,z)
-         integrand = ( G(z)**2. * P_L / P_F )**2. 
-         integrand *= self.k**2. * Deltak * self.dmu / (2. * np.pi**2.)
-         # we are dividing by 2 pi^2 (and not 4 pi^2) since we integrate from mu = 0 to 1
+         kperp     = self.k*np.sqrt(1.-self.mu**2.)
+         return(np.exp(-0.5*(kperp**2+kparallel**2*(1.+f)**2.)*Sigma2))
+      def I1(zbin_idx):
+         z    = self.experiment.zcenters[zbin_idx]
+         f    = self.cosmo.scale_independent_growth_factor_f(z)
+         K,MU = self.k,self.mu
+         P_L1 = compute_matter_power_spectrum(self,z,linear=True)*\
+                  (self.experiment.b[0](z)+f*MU**2.)**2.
+         P_L12 = compute_matter_power_spectrum(self,z,linear=True)*\
+                  (self.experiment.b[0](z)+f*MU**2.)*\
+                  (self.experiment.b[1](z)+f*MU**2.)
+         P_L2 = compute_matter_power_spectrum(self,z,linear=True)*\
+                  (self.experiment.b[1](z)+f*MU**2.)**2.
+         #
+         nsamples= len(self.experiment.b)
+         npairs  = int(nsamples*(nsamples+1)/2)
+         #
+         autoidx= np.arange(npairs)
+         covmat = compute_covariance_matrix(self,zbin_idx)
+         covmat = np.einsum('ijk->kij',covmat)[:,autoidx,:][:,:,autoidx]
+         Cinv   = np.linalg.inv(covmat)
+         # undo the multiplication by dk done in compute_covariance_matrix
+         # as it assumes k-spacing of forecast object
+         Cinv   = np.einsum('kij,k->kij',Cinv,Deltak/self.dk)
+         signal = np.array([G(z)**2*P_L1,G(z)**2*P_L12,G(z)**2*P_L2])
+         #
+         constraints = self.compute_wedge(z,kmin=kmin)
+         F=np.einsum('c,ac,cab,bc->c',constraints,signal,Cinv,signal)
+         # now integrate over mu and return function of k
          ks = self.k.reshape((self.Nk,self.Nmu))[:,0]
-         integrand = integrand.reshape((self.Nk,self.Nmu))
+         integrand = F.reshape((self.Nk,self.Nmu))
          integrand = np.sum(integrand, axis=1)
-         answer = interp1d(ks,integrand)    
-         return answer(k)
-    
-      zedges = np.linspace(zmin,zmax,nbins+1)
-      zs = (zedges[1:]+zedges[:-1])/2.
-      dV = np.array([self.comov_vol(zedges[i],zedges[i+1]) for i in range(nbins)])
-      I = np.array([I1(z) for z in zs])
-      return sum(I*dV)
+         answer = interp1d(ks,integrand)
+         return(answer(k))
+      if zbin_idxs is None:
+         zmin      = self.experiment.zedges[ 0]
+         zmax      = self.experiment.zedges[-1]
+         zedges    = self.experiment.zedges
+         nbins     = len(zedges)-1
+         zbin_idxs = range(nbins)
+      else:
+         raise NotImplementedError("zbin_idxs must be None.")
+      I = np.array([I1(zi) for zi in zbin_idxs])
+      return(sum(I))
