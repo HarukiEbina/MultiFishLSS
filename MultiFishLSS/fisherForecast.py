@@ -1518,13 +1518,6 @@ class fisherForecast(object):
          z    = self.experiment.zcenters[zbin_idx]
          f    = self.cosmo.scale_independent_growth_factor_f(z)
          K,MU = self.k,self.mu
-         P_L1 = compute_matter_power_spectrum(self,z,linear=True)*\
-                  (self.experiment.b[0](z)+f*MU**2.)**2.
-         P_L12 = compute_matter_power_spectrum(self,z,linear=True)*\
-                  (self.experiment.b[0](z)+f*MU**2.)*\
-                  (self.experiment.b[1](z)+f*MU**2.)
-         P_L2 = compute_matter_power_spectrum(self,z,linear=True)*\
-                  (self.experiment.b[1](z)+f*MU**2.)**2.
 
          nsamples= len(self.experiment.b)
          npairs  = int(nsamples*(nsamples+1)/2)
@@ -1566,3 +1559,80 @@ class fisherForecast(object):
          raise NotImplementedError("zbin_idxs must be None.")
       I = np.array([I1(zi) for zi in zbin_idxs])
       return(sum(I))
+
+   def Veff(self,k,zbin_idxs=None, fskyratio=1.,samples=None):
+      """
+      Compute the effective volume k=k in multi-tracer analysis.
+
+      Use P0(k) as signal, which is nearly equivalent to using P(k,mu) with mu=0.6
+      """
+
+      nsamples= len(self.experiment.b)
+      npairs  = int(nsamples*(nsamples+1)/2)
+
+      if samples is not None:
+         sample_idxs = []
+         if not isinstance(samples, list): samples = [samples]
+         for i,s in enumerate(samples):
+            if isinstance(s, int): 
+               if s >= nsamples: raise ValueError("Sample index out of range.")
+               sample_idxs += [s]
+            elif isinstance(s, str):
+               if s not in self.experiment.samples: raise ValueError("Sample name not recognized.")
+               sample_idxs += [self.experiment.samples.index(s)]
+            else: raise ValueError("Samples must be specified as a list of integers or strings.")
+      else: sample_idxs = range(nsamples)
+      pairidx= [] # which spectra to use? for now, the only option is to use all of them
+      for i in range(npairs):
+            s1,s2=self.index2sample(i)
+            if s1 in sample_idxs and s2 in sample_idxs: pairidx += [i]
+      pairidx = np.array(pairidx)
+
+      if zbin_idxs is None:
+         zmin      = self.experiment.zedges[ 0]
+         zmax      = self.experiment.zedges[-1]
+         zedges    = self.experiment.zedges
+         nbins     = len(zedges)-1
+         zbin_idxs = range(nbins)
+      else:
+         raise NotImplementedError("zbin_idxs must be None.")
+      
+      def Veff_z(zbin_idx):
+         zcenter = self.experiment.zcenters[zbin_idx]
+
+         Pfids = self.P_fid[:, zbin_idx] # (npairs, nbins, Nk*Nmu)
+         P0s = np.array([self.LegendreTrans(0,Pfids[n]) for n in range(npairs)]) # P0
+         Ps = P0s + 0. # "P", i.e. the signal vector
+         for i in range(npairs):
+            s1, s2 = self.index2sample(i)
+            Ps[i] -= self.experiment.fover[i]/np.sqrt(self.experiment.n[s1](zcenter)*self.experiment.n[s2](zcenter))
+
+         covmat_prefactor = 1 / (self.Vsurvey[zbin_idx]*fskyratio) # Vsurvey includes fsky factor
+
+         covmat=np.zeros((npairs,npairs,self.Nk))
+         for i in range(npairs):
+            sample1,sample2 = self.index2sample(i)
+            for j in range(npairs):
+                  sample3,sample4=self.index2sample(j)
+                  tuples = np.array([[[sample1,sample3],[sample2,sample4]],[[sample1,sample4],[sample2,sample3]]])
+                  
+                  for l in range(2):
+                     covmat[i,j,:]+= P0s[self.sample2index(tuples[l,0,0],tuples[l,0,1]),:] * P0s[self.sample2index(tuples[l,1,0],tuples[l,1,1]),:]
+         covmat *= covmat_prefactor
+
+         covmat = np.einsum('ijk->kij',covmat)[:,pairidx,:][:,:,pairidx] # (Nk, npairs, npairs)
+         covmat = np.maximum(covmat, 1e-50*np.ones(covmat.shape)) # avoid numerical issues
+         Cinv   = np.linalg.inv(covmat)
+
+         return 2*np.einsum('ac,bc,cab->c',Ps[pairidx],Ps[pairidx],Cinv) # (Nk) effective volume as a function of k
+
+      for zbin_idx in zbin_idxs:
+         if zbin_idx == zbin_idxs[0]: Veff = Veff_z(zbin_idx)
+         else: Veff += Veff_z(zbin_idx)
+
+      K = self.k.reshape((self.Nk,self.Nmu))[:,0]
+      Veff = interp1d(K,Veff,kind='linear',bounds_error=False,fill_value=0.)(k)
+
+      return Veff
+   
+
