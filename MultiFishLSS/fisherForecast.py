@@ -1589,8 +1589,6 @@ class fisherForecast(object):
       pairidx = np.array(pairidx)
 
       if zbin_idxs is None:
-         zmin      = self.experiment.zedges[ 0]
-         zmax      = self.experiment.zedges[-1]
          zedges    = self.experiment.zedges
          nbins     = len(zedges)-1
          zbin_idxs = range(nbins)
@@ -1606,6 +1604,10 @@ class fisherForecast(object):
          for i in range(npairs):
             s1, s2 = self.index2sample(i)
             Ps[i] -= self.experiment.fover[i]/np.sqrt(self.experiment.n[s1](zcenter)*self.experiment.n[s2](zcenter))
+
+            # assert that the signal is non-negative at extremely high-k to stop counterterms
+            P0s[i][Ps[i]<0] += -1 * Ps[i][Ps[i]<0]
+            Ps[i][Ps[i]<0] = 0.
 
          covmat_prefactor = 1 / (self.Vsurvey[zbin_idx]*fskyratio) # Vsurvey includes fsky factor
 
