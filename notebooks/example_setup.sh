@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export MFISHLSS_BASE=/global/homes/h/hebina/MultiFishLSS/MultiFishLSS
+export MFISHLSS_BASE=<parent_directory>/MultiFishLSS/MultiFishLSS
 export PYTHONPATH=$MFISHLSS_BASE:$PYTHONPATH
 
 module load python
