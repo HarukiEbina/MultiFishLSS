@@ -73,7 +73,8 @@ class QFuncFFT:
 
         if extrap:
             qrange = (qs > qmin) * (qs < qmax)
-            return loginterp(qs[qrange],xint[qrange],side=side)(self.qv)
+            if side != 'both': print('Warning: the argument side is deprecated')
+            return loginterp(qs[qrange],xint[qrange],)(self.qv)
         else:
             return np.interp(self.qv, qs, xint)
 

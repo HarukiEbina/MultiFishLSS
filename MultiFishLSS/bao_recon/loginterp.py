@@ -1,57 +1,47 @@
 import numpy as np
-from scipy.interpolate import InterpolatedUnivariateSpline as interpolate
-import inspect
+from scipy.interpolate import make_interp_spline
 
-try:
-    from scipy.differentiate import derivative as _derivative
-except:
-    from scipy.misc import derivative as _derivative
+def loginterp(x, y):
+    '''
+    Extrapolate function by evaluating a log-index of left & right side.
+    
+    From Chirag Modi's CLEFT code at
+    https://github.com/modichirag/CLEFT/blob/master/qfuncpool.py
 
-def derivative(func, x0, dx=1.0, order=9):
-    """
-    Wrapper for scipy.misc.derivative / scipy.differentiate.derivative
-    compatible across SciPy versions.
-    """
-    try:
-        return _derivative(func, x0, dx=dx, order=order)
-    except:
-        res = _derivative(func, x0, initial_step=dx, order=order)
-        if res["status"] != 0:
-            raise ValueError("failed numeric derivative status={}".format(res["status"]))
-        return res["df"]
+    Updated to handle scipy deprecating derivative. Directly adopted from velocileptors.
+    '''
 
-def loginterp(x, y, yint = None, side = "both", lorder = 9, rorder = 9, lp = 1, rp = -1,
-              ldx = 1e-6, rdx = 1e-6):
-    '''Extrapolate function by evaluating a log-index of left & right side
-        '''
-    if yint is None:
-        yint = interpolate(x, y, k = 5)
-    if side == "both":
-        side = "lr"
-    l =lp
-    r =rp
-    lneff = derivative(yint, x[l], dx = x[l]*ldx, order = lorder)*x[l]/y[l]
-    rneff = derivative(yint, x[r], dx = x[r]*rdx, order = rorder)*x[r]/y[r]
-    if lneff < 0:
-        print( 'In function - ', inspect.getouterframes( inspect.currentframe() )[2][3])
-        print('WARNING: Runaway index on left side, bad interpolation. Left index = %0.3e at %0.3e'%(lneff, x[l]))
-    if rneff > 0:
-        print( 'In function - ', inspect.getouterframes( inspect.currentframe() )[2][3])
-        print('WARNING: Runaway index on right side, bad interpolation. Reft index = %0.3e at %0.3e'%(rneff, x[r]))
+    # Find left most point with two consecutive points of the same sign, and same for right
+    lp = 0
+    while np.sign(y[lp]) != np.sign(y[lp+1]):
+        if lp < len(x) - 2:
+            lp += 1
+        else:
+            raise Exception("The input points never stop changing sign!")
+    
+    rp = len(x) - 1
+    while np.sign(y[rp]) != np.sign(y[rp-1]):
+        if rp > 2:
+            rp -= 1
+        else:
+            raise Exception("The input points never stop changing sign!")
+            
+    #print(lp, rp)
 
-    xl = np.logspace(-12, np.log10(x[l]), int(10**5.))
-    xr = np.logspace(np.log10(x[r]), 12., int(10**5.))
-    yl = y[l]*(xl/x[l])**lneff
-    yr = y[r]*(xr/x[r])**rneff
+    # This spline forces the second log derivative at the boundaries to be zero
+    yint = make_interp_spline(np.log(x[lp:(rp+1)]), y[lp:(rp+1)], bc_type='natural')
+            
+    # Now compute the slope at the stable points
+    deriv = yint.derivative()
 
-    xint = x[l+1:r].copy()
-    yint = y[l+1:r].copy()
-    if side.find("l") > -1:
-        xint = np.concatenate((xl, xint))
-        yint = np.concatenate((yl, yint))
-    if side.find("r") > -1:
-        xint = np.concatenate((xint, xr))
-        yint = np.concatenate((yint, yr))
-    yint2 = interpolate(xint, yint, k = 5, ext=3)
+    lneff, rneff = deriv(np.log(x[lp]))/y[lp], deriv(np.log(x[rp]))/y[rp]
+    #print(lneff, rneff)
+    
+    # nan_to_numb is to prevent (xx/x[l/r])^lneff to go to nan on the other side
+    # since this value should be zero on the wrong side anyway
+
+    yint2 = lambda xx:  (xx <= x[lp]) * y[lp]* np.nan_to_num((xx/x[lp])**lneff) \
+                   + (xx >= x[rp]) * y[rp]* np.nan_to_num((xx/x[rp])**rneff) \
+                   + (xx > x[lp]) * (xx < x[rp]) * yint(np.log(xx))
 
     return yint2
