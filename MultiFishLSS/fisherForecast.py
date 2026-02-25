@@ -6,6 +6,8 @@ from functools import partial
 import os, json
 from os.path import exists
 from scipy.integrate import simpson as simps
+from scipy.special import legendre
+import matplotlib.pyplot as plt
 
 
 class fisherForecast(object):
@@ -14,6 +16,13 @@ class fisherForecast(object):
    power spectrum, as well as the CMB lensing cross-/auto spectrum.
    Can build and combine Fisher matrices formed from both of these
    observables.
+
+   recon: [False, 'wigglesplit', 'LPT']
+   If False, don't reconstruct power spectrum. 
+   If 'wigglesplit', use the DESI 2024 wiggle-split reconstruction 
+   method implemented in https://arxiv.org/abs/2402.14070. 
+   If 'LPT', use the standard LPT reconstruction method as implemented
+   in https://arxiv.org/abs/1907.00043.
    '''
    def __init__(self, 
                 cosmo=None, 
@@ -40,6 +49,8 @@ class fisherForecast(object):
                 smooth=False,
                 AP=True,
                 recon=False,
+                recon_sigmas=None,#{'sigmaS':2., 'sigmaPar':5., 'sigmaPerp':2.},
+                sigmaS_default=2.,
                 ell=np.arange(10,1000,1),
                 N2cut=0.2,
                 setup=True,
@@ -73,6 +84,8 @@ class fisherForecast(object):
       self.smooth = smooth
       self.AP = AP
       self.recon = recon
+      self.recon_sigmas = recon_sigmas
+      self.sigmaS_default = sigmaS_default
       self.ell = ell
       self.N2cut = N2cut
       self.basedir = basedir
@@ -91,6 +104,13 @@ class fisherForecast(object):
       dmu = np.array(dmu)
       self.mu = np.tile(mu,self.Nk)
       self.dmu = np.tile(dmu,self.Nk)
+
+      self.N_splines = 7 #per multipole
+      self.splines_array = None
+      self.N_polys = 15 #total
+
+      if self.recon == 'wigglesplit':
+          self.initialise_splines()
 
       # we set these up later
       self.experiment = None     # 
@@ -111,12 +131,15 @@ class fisherForecast(object):
       else:
          self.set_experiment_and_cosmology_specific_parameters(experiment, cosmo, cosmo_fid)
       
+      self.sigma_nl0 = np.sqrt(self.Sigma2(0))
+      
       self.create_json_summary()
       
       if setup or overwrite: 
             self.compute_fiducial_Pk(overwrite=overwrite)
             self.compute_fiducial_Cl(overwrite=overwrite)
             self.compute_fiducial_Precon(overwrite=overwrite)
+
 
 
 
@@ -186,10 +209,15 @@ class fisherForecast(object):
       '''
       Either compute or load fiducial full-shape power spectra
       '''
+      recon = self.recon
+      self.recon = False
+      print('Initialising fiducial Pk with recon = {} and self.recon = {}'.format(recon, self.recon))
+
+
       if isinstance(self.experiment.b,list):nsamples = len(self.experiment.b)
       else:nsamples=1
       self.P_fid = np.zeros((int(nsamples*(nsamples-1)/2+nsamples),self.experiment.nbins,self.Nk*self.Nmu))
-        
+
       # Compute fiducial power spectra in each redshift bin
       for i in range(self.experiment.nbins):
          z = self.experiment.zcenters[i]
@@ -218,7 +246,11 @@ class fisherForecast(object):
                 if j>k:continue
                 ind = self.sample2index(j,k)
                 self.kpar_cut[ind,i,:] = self.compute_kpar_cut(z,i,j,k,ind)
-        
+      
+      self.recon = recon
+      print('Finished computing fiducial Pk, setting self.recon = {}'.format(recon))
+
+              
         
    def compute_fiducial_Cl(self, overwrite=False):
       '''
@@ -271,10 +303,14 @@ class fisherForecast(object):
       '''
       Either compute or load reconstructed power spectra
       '''
+      recon = self.recon
+      self.recon = self.recon or 'wigglesplit'
+      print('Initialising fiducial Precon with recon = {} and self.recon = {}'.format(recon, self.recon))
+      
       if isinstance(self.experiment.b,list):nsamples = len(self.experiment.b)
       else:nsamples=1
       self.P_recon_fid = np.zeros((int(nsamples*(nsamples+1)/2),self.experiment.nbins,self.Nk*self.Nmu))
-        
+      
       # Compute fiducial power spectra in each redshift bin
       for i in range(self.experiment.nbins):
          z = self.experiment.zcenters[i]
@@ -289,13 +325,13 @@ class fisherForecast(object):
                  # P(k)
                  fname = self.basedir+'output/'+self.name+'/derivatives_recon/pfid_'+samplename1+samplename2+'_'+str(round(100*z))+'.txt'
                  if not exists(fname) or overwrite:  
-                    self.recon = True
-                    self.P_recon_fid[ind,i,:] = compute_tracer_power_spectrum(self,j,k,z)
-                    self.recon = False
-                    np.savetxt(fname,self.P_recon_fid[ind,i,:])
+                     self.P_recon_fid[ind,i,:] = compute_tracer_power_spectrum(self,j,k,z)
+                     np.savetxt(fname,self.P_recon_fid[ind,i,:])
                  else:
                     self.P_recon_fid[ind,i,:] = np.genfromtxt(fname)
-                      
+
+      self.recon = recon
+      print('Finished computing fiducial Precon, setting self.recon = {}'.format(recon))
          
    def create_json_summary(self):
       '''
@@ -524,11 +560,20 @@ class fisherForecast(object):
     
     
    def compute_dPdp(self, param,X,Y, z, relative_step=-1., absolute_step=-1., 
-                    one_sided=False, five_point=False,kwargs=None):
+                    one_sided=False, five_point=False, kwargs=None):
       '''
       Calculates the derivative of the galaxy power spectrum
       with respect to the input parameter around the fidicual
       cosmology and redshift. Returns an array of length Nk*Nmu.
+
+      The b, b2, bs, alpha0, alpha2, alpha4, N0, N2, N4 terms only 
+      need to be marginalised for pre-reconstruction or LPT 
+      reconstruction, not WS reconstruction.
+
+      At the fiducial cosmology the AP parameters are 1. The
+      volume prefactor a_||^{-1}a_\perp^{-2} is then 1 at
+      fiducial meaning we do not need to multiply dPdp by 
+      this term if including AP parameters.
       '''
       def paramsample(param,basestr):
           nsamples=len(self.experiment.b)
@@ -537,6 +582,7 @@ class fisherForecast(object):
                 if paramarr[i]==param:
                     return i
           return None
+      
       def paramindex(param,basestr):
           nsamples=len(self.experiment.b)
           npairs=int(nsamples*(nsamples+1)/2)
@@ -604,6 +650,11 @@ class fisherForecast(object):
          #self.params[param] = value
       sample1=X
       sample2=Y
+
+      #Do the same here for $\Sigma_s, \Sigma_\perp, \Sigma_{||}$. Numerically differentiate.
+      #The b, b2, bs, alpha0, alpha2, alpha4, N0, N2, N4 terms only need to be marginalised for pre-reconstruction or LPT reconstruction, not WS reconstruction.
+      #So add a huge if statement. Or a separate function call.
+
       ba_fid=compute_b(self,z,sample1)
       bb_fid=compute_b(self,z,sample2)
       b_fid = 0.5*(ba_fid+bb_fid) 
@@ -625,22 +676,25 @@ class fisherForecast(object):
       else: 
             bsa_fid = self.experiment.bs[sample1](z)
             bsb_fid = self.experiment.bs[sample2](z)
-
+      
       if kwargs is None: 
          kwargs = {'fishcast':self, 'Xind':sample1, 'Yind':sample2, 'z':z, 'ba':ba_fid, 'bb':bb_fid, 'b2a':self.experiment.b2[sample1](z),
                    'b2b':self.experiment.b2[sample2](z), 'bsa':bsa_fid,'bsb':bsb_fid,
                    'alpha0a':alpha0a_fid,'alpha0b':alpha0b_fid, 'alpha2a':0,'alpha2b':0, 'alpha4a':0.,'alpha4b':0., 
                    'alpha6':0, 'N':N_fid, 'N2':N2_fid, 'N4':0.,
                    'f':-1, 'A_lin':self.A_lin, 'omega_lin':self.omega_lin, 'phi_lin':self.phi_lin,'A_log':self.A_log, 
-                   'omega_log':self.omega_log,'phi_log':self.phi_log,'kIR':0.2}
+                   'omega_log':self.omega_log,'phi_log':self.phi_log,'kIR':0.2,
+                   'alpha_parallel': 1., 'alpha_perp': 1., 'ap_deriv': False}#, 
+                   #'sigmaS':sigmaS_fid, 'sigmaPar':sigmaPar_fid, 'sigmaPerp':sigmaPerp_fid}
 
       # if self.experiment.HI: kwargs['N'] = noise # ignores thermal HI noise in deriavtives
-      
+
       nsamples=len(self.experiment.b)
       bidx=None; b2idx=None; bsidx=None
       bidx = paramsample(param,'b')
       b2idx = paramsample(param,'b2')
       bsidx = paramsample(param,'bs')
+
       if bidx is not None:
           if bidx!=sample1 and bidx!=sample2: return np.zeros(self.k.shape)
           elif bidx==sample1 and bidx==sample2:
@@ -705,13 +759,33 @@ class fisherForecast(object):
           elif alpha4idx==sample1: param='alpha4a'
           elif alpha4idx==sample2: param='alpha4b'
           else: print('error alpha4', X, Y, param)
+
+      P_fid = compute_tracer_power_spectrum(**kwargs)
+
+      def AP_effect(daperpdp,dapardp):
+         K,MU = self.k,self.mu
+         
+         res = -(dapardp+2*daperpdp)*P_fid
+         res -= MU*(1-MU**2)*(dapardp-daperpdp)*self.dPdmu(P_fid)
+         res -= K*(dapardp*MU**2 + daperpdp*(1-MU**2))*self.dPdk(P_fid)
+         return res
+
+         
       if param in kwargs or param == 'f_NL': 
          fNL_flag = False
          if param == 'f_NL': 
             param = 'b' ; fNL_flag = True
          if param == 'f': default_value = f_fid
          else: default_value = kwargs[param]
-         #
+         print("{}in kwargs, default_value = {}".format(param, default_value))
+
+         if param in {'alpha_parallel', 'alpha_perp'}:
+            kwargs['ap_deriv'] = True 
+
+            if self.recon == 'LPT':
+               args = {'alpha_parallel': (0.,1.), 'alpha_perp': (1.,0.)}
+               return AP_effect(*args[param])
+
          up = default_value*(1+relative_step)
          if default_value == 0: up = absolute_step
          down = default_value*(1-relative_step)
@@ -755,9 +829,7 @@ class fisherForecast(object):
          if X==0 and Y!=X: return plin*MU**2*(bb_fid+f_fid*MU**2)
          if Y==0 and Y!=X: return plin*MU**2*(ba_fid+f_fid*MU**2)
          print('error') 
-
-      P_fid = compute_tracer_power_spectrum(**kwargs) 
-
+           
       if param == 'norm': return 2*P_fid  
 
       if param == 'Tb': 
@@ -766,13 +838,55 @@ class fisherForecast(object):
          Tb = 188e-3*(self.cosmo.h())/Ez*Ohi*(1+z)**2
          return 2. * ( P_fid - noise  + castorinaPn(z)) / Tb  
 
-      if param == 'alpha_parallel':
-         K,MU = self.k,self.mu
-         return -P_fid - MU*(1-MU**2)*self.dPdmu(P_fid) - K*MU**2*self.dPdk(P_fid)
+      
 
-      if param == 'alpha_perp':
-         K,MU = self.k,self.mu
-         return -2*P_fid + MU*(1-MU**2)*self.dPdmu(P_fid) - K*(1-MU**2)*self.dPdk(P_fid)       
+      # if param in ['alpha_parallel', 'alpha_perp']: 
+
+      #    if self.recon == 'wigglesplit':
+      #       """
+      #       For BAO-only forecasting we take derivatives of P_recon not P_True and therefore
+      #       ignore the derivative of the AP volume rescaling and do not marginalise over the 
+      #       broadband polynomials. 
+
+      #       The wigglesplit recon method depend on AP params and requires brute force numerical diff.
+      #       """
+      #       print('self.recon == wigglesplit, numerically differentiating Precon with respect to alpha_par/perp')
+            
+      #       default_value = 1. #At fiducial cosmo AP params = 1.
+            
+      #       up = default_value * (1. + relative_step)
+      #       upup = default_value * (1. + 2.*relative_step)
+      #       down = default_value * (1. - relative_step)
+      #       downdown = default_value * (1. - 2.*relative_step)
+      #       step = default_value * relative_step
+
+      #       if param == 'alpha_perp':
+      #          P_dummy_hi = compute_tracer_power_spectrum(**kwargs, a_perp=up, ap_deriv=True)
+      #          P_dummy_higher = compute_tracer_power_spectrum(**kwargs, a_perp=upup, ap_deriv=True)
+      #          P_dummy_low = compute_tracer_power_spectrum(**kwargs, a_perp=down, ap_deriv=True)
+      #          P_dummy_lower = compute_tracer_power_spectrum(**kwargs, a_perp=downdown, ap_deriv=True)
+
+      #       elif param == 'alpha_parallel':
+      #          P_dummy_hi = compute_tracer_power_spectrum(**kwargs, a_par=up, ap_deriv=True)
+      #          P_dummy_higher = compute_tracer_power_spectrum(**kwargs,  a_par=upup, ap_deriv=True)
+      #          P_dummy_low = compute_tracer_power_spectrum(**kwargs, a_par=down, ap_deriv=True)
+      #          P_dummy_lower = compute_tracer_power_spectrum(**kwargs, a_par=downdown, ap_deriv=True)
+
+
+      #       if five_point: dPdtheta = (-P_dummy_higher + 8.*P_dummy_hi - 8.*P_dummy_low + P_dummy_lower) / (12. * step)
+      #       else: dPdtheta = (P_dummy_hi - P_dummy_low) / (2. * step)
+            
+      #       return dPdtheta 
+
+      #    else:
+      #       if param == 'alpha_parallel':
+      #          return AP_effect(0.,1.)
+
+      #       elif param == 'alpha_perp':
+      #          return AP_effect(1.,0.)    
+         
+   
+             
             
       # derivative of early dark energy parameters (Hill+2020)
       if param == 'fEDE' and self.fEDE == 0.:
@@ -855,9 +969,8 @@ class fisherForecast(object):
          result += (-P_dummy_higher + 8.*P_dummy_hi - 8.*P_dummy_low + P_dummy_lower) / (12. * step)
          daperpdp = (-aperp_higher + 8.*aperp_hi - 8.*aperp_low + aperp_lower) / (12. * step)
          dapardp = (-apar_higher + 8.*apar_hi - 8.*apar_low + apar_lower) / (12. * step)
-         K,MU = self.k,self.mu
-         if self.AP: result += -(dapardp+2*daperpdp)*P_fid - MU*(1-MU**2)*(dapardp-daperpdp)*self.dPdmu(P_fid) -\
-                               K*(dapardp*MU**2 + daperpdp*(1-MU**2))*self.dPdk(P_fid)
+
+         if self.AP: result += AP_effect(daperpdp,dapardp)
          if flag: result *= self.params['A_s']
          return result
 
@@ -879,9 +992,8 @@ class fisherForecast(object):
       result += (P_dummy_hi - P_dummy_low) / (2. * step)
       daperpdp = (aperp_hi - aperp_low) / (2. * step)
       dapardp = (apar_hi - apar_low) / (2. * step)
-      K,MU = self.k,self.mu
-      if self.AP: result += -(dapardp+2*daperpdp)*P_fid - MU*(1-MU**2)*(dapardp-daperpdp)*self.dPdmu(P_fid) -\
-                               K*(dapardp*MU**2 + daperpdp*(1-MU**2))*self.dPdk(P_fid)
+      
+      if self.AP: result += AP_effect(daperpdp,dapardp)
       if flag: result *= self.params['A_s']
       #if param=='sigma8': result*=self.params['sigma8']
       return result
@@ -1097,7 +1209,7 @@ class fisherForecast(object):
       # return wedge*kparallel_constraint
     
 
-    
+   
    def compute_derivatives(self, five_point=True, parameters=None, z=None, overwrite=False):
       '''
       Calculates all the derivatives and saves them to the 
@@ -1205,7 +1317,8 @@ class fisherForecast(object):
       '''
       Plots all the derivatives in the output/forecast name/derivatives directory
       '''
-      directory = self.basedir+'output/'+self.name+'/derivatives'
+
+      directory = self.basedir+'output/'+self.name+'/derivatives_recon'
       for root, dirs, files in os.walk(directory, topdown=False):
          for file in files:
             filename = os.path.join(directory, file)
@@ -1220,8 +1333,8 @@ class fisherForecast(object):
             plt.clf()
             print(file)
             
-            
-   def load_derivatives(self, basis, log10z_c=-1.,omega_lin=-1,omega_log=-1,polys=True,auto_only=False,return_auto=False):
+           
+   def load_derivatives(self, basis, log10z_c=-1.,omega_lin=-1,omega_log=-1,marg_polys=True, marg_splines=True, auto_only=False,return_auto=False):
       '''
       Let basis = [p1, p2, ...], and denote the centers of the
       redshift bins by z1, z2, ... This returns a matrix of the
@@ -1233,6 +1346,11 @@ class fisherForecast(object):
                      
       Where dPdpi is the derivative with respect to the ith basis
       parameter (an array of length Nk*Nmu). 
+
+      if doing reconstruction add 15 polynomial broadband corrections to marginalise over. Fiducial value is 
+      that the constant polynomial c_0 = shot noise and c_i = 0.
+
+      If using wigglesplit reconstruction add 21 (7 for each multipole) spline amplitudes to marginalise over.
       '''
       if return_auto: auto_only=True
       if log10z_c == -1. : log10z_c = self.log10z_c  
@@ -1245,9 +1363,16 @@ class fisherForecast(object):
       if self.recon: folder = '/derivatives_recon/'
       directory = self.basedir+'output/'+self.name+folder
       basis=self.get_listparams(list(basis),auto_only=auto_only)
-      
+
+      use_polys = (self.recon == 'LPT')
+      use_splines = (self.recon == 'wigglesplit')
+
       N = len(basis)
-      if self.recon and polys: N += 15*npairs
+      if use_polys and marg_polys:
+         N += self.N_polys*npairs
+      if use_splines and marg_splines:
+         N += 3*self.N_splines*npairs
+
       derivatives = np.zeros((npairs,nbins,N,self.Nk*self.Nmu))
       for zbin_index in range(nbins):
          z = self.experiment.zcenters[zbin_index]
@@ -1270,10 +1395,39 @@ class fisherForecast(object):
                 else: dPdp = np.genfromtxt(self.basedir+'output/'+self.name+'/derivatives/'+filename)
 
                 derivatives[j,zbin_index,i,:] = dPdp
-         if self.recon and polys:
-            for m in range(15):
-                for j in range(npairs):
-                    derivatives[j,zbin_index,npairs*m+j+len(basis)] = self.mu**(2*(m//5)) * self.k**(m%5)
+         
+
+         if use_polys and marg_polys:
+            print('marginalising polys')
+            for m in range(self.N_polys):
+               for j in range(npairs):
+                  derivatives[j,zbin_index,npairs*m+j+len(basis)] = self.mu**(2*(m//5)) * self.k**(m%5)
+      
+         if use_splines and marg_splines:
+            counter = self.N_polys*npairs if (use_polys and marg_polys) else 0
+            print('marginalising splines new method')
+            mu = self.mu.reshape((self.Nk,self.Nmu))[0,:]
+
+            for ell_index, ell in enumerate([0,2,4]):
+               L = legendre(ell)(mu)
+
+               for m in range(self.N_splines):
+                  for j in range(npairs):
+                     
+                     param_index =  len(basis)+counter \
+                                    + ell_index*self.N_splines*npairs \
+                                    + npairs*m \
+                                    + j
+
+                     derivatives[j,zbin_index,param_index] = np.outer(self.splines_array[m], L).ravel() # (Nk, Nmu)
+            
+            # l_sum = np.sum(legendre(2*i)(mu) for i in range(3))
+
+            # for m in range(self.N_splines):
+            #    for j in range(npairs):
+            #       derivatives[j,zbin_index,npairs*m+j+len(basis)+counter] = np.outer(self.splines_array[m], l_sum).ravel()
+
+
       if return_auto: 
         idx=[]
         for j in range(npairs):
@@ -1281,7 +1435,93 @@ class fisherForecast(object):
             if s1!=s2:idx+=[j+0]
         derivatives=np.delete(derivatives,idx,axis=0)
       return derivatives
-            
+   
+   def W3(self, x):
+      """
+      W3 is the piecewise cubic spline (4th-order) extension of the counts-in-cell interpolation kernel (Hockney & Eastwood 1988; Jeong 2010).
+      """
+      absx = np.abs(x)
+
+      ret = np.zeros_like(absx, dtype=float)
+
+      #region 1
+      mask1 = absx <= 1
+      ret[mask1] = 4 - 6 * absx[mask1]**2  + 3 * absx[mask1]**3 
+      
+      #region 2
+      mask2 = (absx > 1) & (absx <=2)
+      ret[mask2] = 8 - 12 * absx[mask2]  + 6 * absx[mask2]**2 - absx[mask2]**3 
+
+      return 1./6. * ret
+
+   def initialise_splines(self, k=None, delta=0.06):
+      """
+      Initialise the broadband splines. For broadband term 
+      
+      D_ell = \sum_{n=-1} ^ {N_\max} a_{\ell, n} W3(k/\delta - n)
+
+      We have that for fiducial values of a_{\ell, n} = 1 (our choice), 
+
+      D_0 = D_2 = D_4 = \sum_{n=-1} ^ {N_\max} W3(k/\delta - n)
+
+      And dP/da_{\ell,n} = W3(n)*\mathcal{L}_\ell(\mu) 
+
+      We keep the values as an n by mu*k array so we can use it for derivatives (access each n)
+      and for the broadband term in wiggle_split_recon (sum array along n).
+      """
+      arr = np.zeros( (self.N_splines, self.Nk) )
+
+      if k is None:
+         k = self.k.reshape((self.Nk,self.Nmu))[:,0]
+
+      for n in range(self.N_splines):
+          arr[n] = self.W3(k/delta - (n - 1))
+
+      self.splines_array = arr
+
+   def compute_recon_sigmas(self, z, model_params):
+      """
+      Compute the reconstruction sigmas (FOG damping, damping parallel to LoS, damping perpendicular to LoS).
+
+      If the damping parameters are provided, return them.
+
+      If they are not provided but are specified when initialising the forecast, return those.
+
+      Else, compute the parameters according to 
+
+      \Sigma_\perp = r * \Sigma_{NL}(z=0) * D(z)
+      \Sigma_\par = (1 + f(z)) * \Sigma_\perp
+
+      Where 
+
+      \Sigma_NL^2 = 1/(6pi^2) \int dk P_m(k)
+
+      And r = r(x) is computed in twoPoint.py according to 
+      "DESI and other Dark Energy experiments in the era of neutrino mass measurements", 
+      i.e. interpolating a table to account for the effect of shot noise on reconstruction.
+      """
+      r = model_params['r']
+      sigmaS = model_params['sigmaS']
+      sigmaPar = model_params['sigmaPar']
+      sigmaPerp = model_params['sigmaPerp']
+      f = model_params['f']
+
+      if sigmaS is not None and sigmaPar is not None and sigmaPerp is not None:
+         return sigmaS, sigmaPar, sigmaPerp
+      
+      elif getattr(self, "recon_sigmas", None) is not None:
+         sigmaS = sigmaS or self.recon_sigmas.get("sigmaS", None)
+         sigmaPerp = sigmaPerp or self.recon_sigmas.get("sigmaPerp", None)
+         sigmaPar = sigmaPar or self.recon_sigmas.get("sigmaPar", None)
+      
+      else:
+         sigmaS = sigmaS or self.sigmaS_default
+         sigmaNL = self.sigma_nl0 * self.cosmo.scale_independent_growth_factor(z) #np.sqrt(self.Sigma2(z))
+         
+         sigmaPerp = sigmaPerp or r * sigmaNL
+         sigmaPar = sigmaPar or (1. + f) * sigmaPerp
+
+      return sigmaS, sigmaPar, sigmaPerp
 
    def shuffle_fisher(self,F,globe,Nz=None):
       N = len(F)
@@ -1329,7 +1569,7 @@ class fisherForecast(object):
 
    def gen_fisher(self,basis,globe,log10z_c=-1.,omega_lin=-1.,omega_log=-1.,kmax_knl=1.,
                   kmin=0.003,kmax=-10.,kpar_min=-1.,mu_min=-1,derivatives=None,
-                  zbins=None,polys=True,simpson=False,nratio=1.,auto_only=False,fskyratio=1.):
+                  zbins=None,marg_polys=True, marg_splines=True,simpson=False,nratio=1.,auto_only=False,fskyratio=1.):
       '''
       Computes an array of Fisher matrices, one for each redshift bin.
       '''
@@ -1341,7 +1581,7 @@ class fisherForecast(object):
       basis=self.get_listparams(list(basis),auto_only=auto_only)
         
       if derivatives is None: derivatives = self.load_derivatives(basis,log10z_c=log10z_c,
-                                                                  omega_lin=omega_lin,omega_log=omega_log,polys=polys,auto_only=auto_only)   
+                                                                  omega_lin=omega_lin,omega_log=omega_log,marg_polys=marg_polys, marg_splines=marg_splines, auto_only=auto_only)   
       if zbins is None: zbins = range(self.experiment.nbins)
 
       autoidx=[]
@@ -1352,7 +1592,15 @@ class fisherForecast(object):
             else: autoidx+=[i]
       def fish(zbin_index):
          n = len(basis)
-         if self.recon: n += 15*npairs
+
+         use_polys = (self.recon == 'LPT')
+         use_splines = (self.recon == 'wigglesplit')
+
+         if use_polys and marg_polys:
+            n += self.N_polys*npairs
+         if use_splines and marg_splines:
+            n += 3*self.N_splines*npairs
+         
          F = np.zeros((n,n))
          z = self.experiment.zcenters[zbin_index]
          dPdvecp = derivatives[autoidx,:,:][:,zbin_index,:,:]
