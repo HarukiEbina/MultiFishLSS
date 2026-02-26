@@ -17,9 +17,10 @@ class fisherForecast(object):
    Can build and combine Fisher matrices formed from both of these
    observables.
 
-   recon: [False, 'wigglesplit', 'LPT']
+   reccon: [False, True]
+   method: ['DESI2024', 'LPT']
    If False, don't reconstruct power spectrum. 
-   If 'wigglesplit', use the DESI 2024 wiggle-split reconstruction 
+   If 'DESI2024', use the DESI 2024 wiggle-split reconstruction 
    method implemented in https://arxiv.org/abs/2402.14070. 
    If 'LPT', use the standard LPT reconstruction method as implemented
    in https://arxiv.org/abs/1907.00043.
@@ -49,6 +50,7 @@ class fisherForecast(object):
                 smooth=False,
                 AP=True,
                 recon=False,
+                method="LPT",
                 recon_sigmas=None,#{'sigmaS':2., 'sigmaPar':5., 'sigmaPerp':2.},
                 sigmaS_default=2.,
                 ell=np.arange(10,1000,1),
@@ -84,6 +86,7 @@ class fisherForecast(object):
       self.smooth = smooth
       self.AP = AP
       self.recon = recon
+      self.method = method
       self.recon_sigmas = recon_sigmas
       self.sigmaS_default = sigmaS_default
       self.ell = ell
@@ -109,7 +112,7 @@ class fisherForecast(object):
       self.splines_array = None
       self.N_polys = 15 #total
 
-      if self.recon == 'wigglesplit':
+      if self.method == 'DESI2024':
           self.initialise_splines()
 
       # we set these up later
@@ -209,10 +212,6 @@ class fisherForecast(object):
       '''
       Either compute or load fiducial full-shape power spectra
       '''
-      recon = self.recon
-      self.recon = False
-      print('Initialising fiducial Pk with recon = {} and self.recon = {}'.format(recon, self.recon))
-
 
       if isinstance(self.experiment.b,list):nsamples = len(self.experiment.b)
       else:nsamples=1
@@ -246,11 +245,7 @@ class fisherForecast(object):
                 if j>k:continue
                 ind = self.sample2index(j,k)
                 self.kpar_cut[ind,i,:] = self.compute_kpar_cut(z,i,j,k,ind)
-      
-      self.recon = recon
-      print('Finished computing fiducial Pk, setting self.recon = {}'.format(recon))
 
-              
         
    def compute_fiducial_Cl(self, overwrite=False):
       '''
@@ -303,9 +298,6 @@ class fisherForecast(object):
       '''
       Either compute or load reconstructed power spectra
       '''
-      recon = self.recon
-      self.recon = self.recon or 'wigglesplit'
-      print('Initialising fiducial Precon with recon = {} and self.recon = {}'.format(recon, self.recon))
       
       if isinstance(self.experiment.b,list):nsamples = len(self.experiment.b)
       else:nsamples=1
@@ -325,13 +317,12 @@ class fisherForecast(object):
                  # P(k)
                  fname = self.basedir+'output/'+self.name+'/derivatives_recon/pfid_'+samplename1+samplename2+'_'+str(round(100*z))+'.txt'
                  if not exists(fname) or overwrite:  
+                     self.recon = True
                      self.P_recon_fid[ind,i,:] = compute_tracer_power_spectrum(self,j,k,z)
+                     self.recon = False
                      np.savetxt(fname,self.P_recon_fid[ind,i,:])
                  else:
-                    self.P_recon_fid[ind,i,:] = np.genfromtxt(fname)
-
-      self.recon = recon
-      print('Finished computing fiducial Precon, setting self.recon = {}'.format(recon))
+                     self.P_recon_fid[ind,i,:] = np.genfromtxt(fname)
          
    def create_json_summary(self):
       '''
@@ -777,12 +768,12 @@ class fisherForecast(object):
             param = 'b' ; fNL_flag = True
          if param == 'f': default_value = f_fid
          else: default_value = kwargs[param]
-         print("{}in kwargs, default_value = {}".format(param, default_value))
+         print("{} in kwargs, default_value = {}".format(param, default_value))
 
          if param in {'alpha_parallel', 'alpha_perp'}:
             kwargs['ap_deriv'] = True 
 
-            if self.recon == 'LPT':
+            if self.method == 'LPT':
                args = {'alpha_parallel': (0.,1.), 'alpha_perp': (1.,0.)}
                return AP_effect(*args[param])
 
@@ -842,15 +833,15 @@ class fisherForecast(object):
 
       # if param in ['alpha_parallel', 'alpha_perp']: 
 
-      #    if self.recon == 'wigglesplit':
+      #    if self.recon == 'DESI2024':
       #       """
       #       For BAO-only forecasting we take derivatives of P_recon not P_True and therefore
       #       ignore the derivative of the AP volume rescaling and do not marginalise over the 
       #       broadband polynomials. 
 
-      #       The wigglesplit recon method depend on AP params and requires brute force numerical diff.
+      #       The DESI2024 recon method depend on AP params and requires brute force numerical diff.
       #       """
-      #       print('self.recon == wigglesplit, numerically differentiating Precon with respect to alpha_par/perp')
+      #       print('self.recon == DESI2024, numerically differentiating Precon with respect to alpha_par/perp')
             
       #       default_value = 1. #At fiducial cosmo AP params = 1.
             
@@ -1350,7 +1341,7 @@ class fisherForecast(object):
       if doing reconstruction add 15 polynomial broadband corrections to marginalise over. Fiducial value is 
       that the constant polynomial c_0 = shot noise and c_i = 0.
 
-      If using wigglesplit reconstruction add 21 (7 for each multipole) spline amplitudes to marginalise over.
+      If using DESI2024 reconstruction add 21 (7 for each multipole) spline amplitudes to marginalise over.
       '''
       if return_auto: auto_only=True
       if log10z_c == -1. : log10z_c = self.log10z_c  
@@ -1364,8 +1355,8 @@ class fisherForecast(object):
       directory = self.basedir+'output/'+self.name+folder
       basis=self.get_listparams(list(basis),auto_only=auto_only)
 
-      use_polys = (self.recon == 'LPT')
-      use_splines = (self.recon == 'wigglesplit')
+      use_polys = (self.method == 'LPT')
+      use_splines = (self.method == 'DESI2024')
 
       N = len(basis)
       if use_polys and marg_polys:
@@ -1467,7 +1458,7 @@ class fisherForecast(object):
       And dP/da_{\ell,n} = W3(n)*\mathcal{L}_\ell(\mu) 
 
       We keep the values as an n by mu*k array so we can use it for derivatives (access each n)
-      and for the broadband term in wiggle_split_recon (sum array along n).
+      and for the broadband term in DESI2024_recon (sum array along n).
       """
       arr = np.zeros( (self.N_splines, self.Nk) )
 
@@ -1593,8 +1584,8 @@ class fisherForecast(object):
       def fish(zbin_index):
          n = len(basis)
 
-         use_polys = (self.recon == 'LPT')
-         use_splines = (self.recon == 'wigglesplit')
+         use_polys = (self.method == 'LPT')
+         use_splines = (self.method == 'DESI2024')
 
          if use_polys and marg_polys:
             n += self.N_polys*npairs

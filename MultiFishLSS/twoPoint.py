@@ -9,7 +9,7 @@ from scipy.interpolate import InterpolatedUnivariateSpline as Spline
 from scipy.special import legendre
 
 
-from bao_recon.wiggle_split_recon import WiggleSplit_Recon
+from bao_recon.DESI2024_recon import DESI2024_Recon
 
 
 def compute_b(fishcast,z,X=0):
@@ -268,7 +268,7 @@ def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1,
          model_params['ba'] = ba 
          model_params['bb'] = bb
 
-      print('WS ba,bb = {},{}'.format(model_params['ba'],model_params['bb']))
+      print('DESI2024 ba,bb = {},{}'.format(model_params['ba'],model_params['bb']))
 
       return compute_recon_power_spectrum(fishcast,z,Xind, Yind, bpoly, moments, model_params)
    
@@ -566,10 +566,10 @@ def compute_recon_power_spectrum(fishcast,z,Xind, Yind, bpoly, moments, model_pa
 
    plin = np.array([fishcast.cosmo.pk_cb_lin(k*h,z)*h**3. for k in klin])
 
-   if fishcast.recon == 'LPT':
+   if fishcast.method == 'LPT':
       p0, p2, p4 = LPT_recon_power_spectrum(fishcast,z,bpoly, klin, plin, f=model_params['f'])
       
-   elif fishcast.recon == 'wigglesplit':
+   elif fishcast.method == 'DESI2024':
 
       ba = model_params['ba']
       bb = model_params['bb']
@@ -584,7 +584,7 @@ def compute_recon_power_spectrum(fishcast,z,Xind, Yind, bpoly, moments, model_pa
       model_params['sigmaPar'] = sigmaPar 
       model_params['sigmaPerp'] = sigmaPerp
 
-      p0, p2, p4 = wiggle_split_recon_power_spectrum(fishcast,z, klin, mulin, plin, model_params)
+      p0, p2, p4 = DESI2024_recon_power_spectrum(fishcast,z, klin, mulin, plin, model_params)
    
    else:
       raise Exception('recon method not recognized')
@@ -603,13 +603,13 @@ def compute_recon_power_spectrum(fishcast,z,Xind, Yind, bpoly, moments, model_pa
    return result.flatten() + N
       
    
-def wiggle_split_recon_power_spectrum(fishcast,z, klin, mulin, plin, model_params):
+def DESI2024_recon_power_spectrum(fishcast,z, klin, mulin, plin, model_params):
    '''
    Returns the reconstructed power spectrum, following the DESI wiggle-split method.
    '''   
-   wsplit = WiggleSplit_Recon(fishcast=fishcast,z=z,k=klin,mu=mulin,plin=plin, model_params=model_params)
+   desi2024 = DESI2024_Recon(fishcast=fishcast,z=z,k=klin,mu=mulin,plin=plin, model_params=model_params)
 
-   return wsplit.compute()
+   return desi2024.compute()
 
 
 def LPT_recon_power_spectrum(fishcast,z,bpoly, klin, plin, f):

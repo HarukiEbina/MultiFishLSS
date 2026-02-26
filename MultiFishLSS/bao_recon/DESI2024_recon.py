@@ -5,10 +5,10 @@ from scipy import special
 from scipy import fftpack, interpolate
 from scipy.special import legendre
 from scipy.integrate import simpson
+from bao_recon.loginterp import loginterp
 
 
-
-class WiggleSplit_Recon:
+class DESI2024_Recon:
     """
     Class to perform wiggle/no-wiggle split of a linear power spectrum
     using the DESI 2024 reconstruction method. For more details please see 
@@ -99,24 +99,6 @@ class WiggleSplit_Recon:
 
         if self.integration == 'leggauss':
             self.set_leggauss_mu_wmu(mu=50)
-    
-
-    def _interp(self, f, kold, knew, loglog=True):
-        """
-        Interpolate power spectrum in log-log space. Makes it easier 
-        for spline interpolation to accurately capture BAO wiggles.
-        """
-        if loglog:
-            logkold = np.log(kold)
-            logknew = np.log(knew)
-            logf = np.log(f)
-            logf_interp = interpolate.CubicSpline(logkold, logf, axis=0, extrapolate=True)(logknew)
-            f_interp = np.exp(logf_interp)
-        else:
-            f_interp = interpolate.CubicSpline(kold, f, axis=0, extrapolate=True)(knew)
-
-        return f_interp
-        #return interpolate.CubicSpline(kold, f, axis=0, extrapolate=True)(knew)
 
 
     def compute(self):
@@ -136,8 +118,8 @@ class WiggleSplit_Recon:
 
         k_ap, mu_ap = self.get_kmu_ap(k, mu, alpha_perp=self.alpha_perp, alpha_parallel=self.alpha_parallel)
 
-        pap = self._interp(f=self.plin, kold=self.k, knew=k_ap) 
-        pnwap = self._interp(f=pnw, kold=self.k, knew=k_ap)
+        pap = loginterp(self.k, self.plin)(k_ap) 
+        pnwap = loginterp(self.k, pnw)(k_ap)
 
         pwap = pap - pnwap 
 
