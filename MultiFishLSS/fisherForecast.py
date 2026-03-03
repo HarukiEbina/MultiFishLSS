@@ -51,6 +51,7 @@ class fisherForecast(object):
                 AP=True,
                 recon=False,
                 method="LPT",
+                fix_damping=True,
                 recon_sigmas=None,#{'sigmaS':2., 'sigmaPar':5., 'sigmaPerp':2.},
                 sigmaS_default=2.,
                 ell=np.arange(10,1000,1),
@@ -87,6 +88,7 @@ class fisherForecast(object):
       self.AP = AP
       self.recon = recon
       self.method = method
+      self.fix_damping = fix_damping
       self.recon_sigmas = recon_sigmas
       self.sigmaS_default = sigmaS_default
       self.ell = ell

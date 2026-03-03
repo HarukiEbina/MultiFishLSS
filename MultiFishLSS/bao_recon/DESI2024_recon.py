@@ -62,9 +62,11 @@ class DESI2024_Recon:
         self.bb = model_params['bb']
         self.f = model_params['f']
         self.ap_deriv = model_params['ap_deriv']
+        self.fix_damping = model_params['fix_damping']
+
 
         print(
-        'sigmaS = {} \n ' \
+        ' sigmaS = {} \n ' \
         'sigmaPar = {} \n ' \
         'sigmaPerp = {} \n ' \
         'r = {} \n ' \
@@ -73,9 +75,10 @@ class DESI2024_Recon:
         'f = {} \n ' \
         'alpha_parallel = {} \n ' \
         'alpha_perp = {} \n ' \
-        'ap_deriv = {}'.format(self.sigmaS,self.sigmaPar,self.sigmaPerp,
+        'ap_deriv = {} \n ' \
+        'fix_damping = {}'.format(self.sigmaS,self.sigmaPar,self.sigmaPerp,
                                model_params['r'],self.ba,self.bb,self.f, 
-                               self.alpha_parallel, self.alpha_perp, self.ap_deriv))
+                               self.alpha_parallel, self.alpha_perp, self.ap_deriv, self.fix_damping))
 
         self.ells = ells
 
@@ -132,7 +135,9 @@ class DESI2024_Recon:
             # dP/dAP = d/dAP( C(k_AP,mu_AP) * P_w(k_AP) )
             B = 0.
             D = 0. 
-            #C = self.compute_C(k, mu) # Turn on to make dP/dAP = C(k,mu) * dP_w(k_AP)/dAP
+
+            if self.fix_damping:
+                C = self.compute_C(k, mu) # Turn on to make dP/dAP = C(k,mu) * dP_w(k_AP)/dAP
 
         Pkmu = B * pnw + C * pwap
 

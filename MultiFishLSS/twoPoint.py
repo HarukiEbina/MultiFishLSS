@@ -268,6 +268,8 @@ def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1,
          model_params['ba'] = ba 
          model_params['bb'] = bb
 
+      model_params['fix_damping'] = fishcast.fix_damping
+
       print('DESI2024 ba,bb = {},{}'.format(model_params['ba'],model_params['bb']))
 
       return compute_recon_power_spectrum(fishcast,z,Xind, Yind, bpoly, moments, model_params)
