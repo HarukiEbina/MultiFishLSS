@@ -38,6 +38,8 @@ def recon_efficiency(fishcast, z, n, ba, bb, f, k0=0.14, mu0=0.6):
    Computes reconstruction efficiency according to 
    "DESI and other Dark Energy experiments in the era of neutrino mass measurements"
    By interpolating a table across x = n*P_g(k0,mu0)/0.1734.
+
+   Check how shotnoise is computed for cross spectra.
    """
    h = fishcast.cosmo.h()
 
@@ -257,7 +259,6 @@ def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1,
                    'sigmaS': sigmaS, 'sigmaPar': sigmaPar, 'sigmaPerp': sigmaPerp, 
                    'f':f, 'ba': None, 'bb': None, 'r': None}
       
-      print('b, ba,bb = {},{},{}'.format(b,ba,bb))
       if b != -1: 
          model_params['ba'] = b
          model_params['bb'] = b
@@ -269,8 +270,6 @@ def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1,
          model_params['bb'] = bb
 
       model_params['fix_damping'] = fishcast.fix_damping
-
-      print('DESI2024 ba,bb = {},{}'.format(model_params['ba'],model_params['bb']))
 
       return compute_recon_power_spectrum(fishcast,z,Xind, Yind, bpoly, moments, model_params)
    
@@ -568,10 +567,10 @@ def compute_recon_power_spectrum(fishcast,z,Xind, Yind, bpoly, moments, model_pa
 
    plin = np.array([fishcast.cosmo.pk_cb_lin(k*h,z)*h**3. for k in klin])
 
-   if fishcast.method == 'LPT':
+   if fishcast.recon_method == 'LPT':
       p0, p2, p4 = LPT_recon_power_spectrum(fishcast,z,bpoly, klin, plin, f=model_params['f'])
       
-   elif fishcast.method == 'DESI2024':
+   elif fishcast.recon_method == 'DESI2024':
 
       ba = model_params['ba']
       bb = model_params['bb']

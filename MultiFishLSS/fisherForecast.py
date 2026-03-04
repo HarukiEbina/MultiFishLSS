@@ -17,7 +17,7 @@ class fisherForecast(object):
    Can build and combine Fisher matrices formed from both of these
    observables.
 
-   reccon: [False, True]
+   recon: [False, True]
    method: ['DESI2024', 'LPT']
    If False, don't reconstruct power spectrum. 
    If 'DESI2024', use the DESI 2024 wiggle-split reconstruction 
@@ -50,7 +50,7 @@ class fisherForecast(object):
                 smooth=False,
                 AP=True,
                 recon=False,
-                method="LPT",
+                recon_method="LPT",
                 fix_damping=True,
                 recon_sigmas=None,#{'sigmaS':2., 'sigmaPar':5., 'sigmaPerp':2.},
                 sigmaS_default=2.,
@@ -87,7 +87,7 @@ class fisherForecast(object):
       self.smooth = smooth
       self.AP = AP
       self.recon = recon
-      self.method = method
+      self.recon_method = recon_method
       self.fix_damping = fix_damping
       self.recon_sigmas = recon_sigmas
       self.sigmaS_default = sigmaS_default
@@ -114,7 +114,7 @@ class fisherForecast(object):
       self.splines_array = None
       self.N_polys = 15 #total
 
-      if self.method == 'DESI2024':
+      if self.recon_method == 'DESI2024':
           self.initialise_splines()
 
       # we set these up later
@@ -644,10 +644,6 @@ class fisherForecast(object):
       sample1=X
       sample2=Y
 
-      #Do the same here for $\Sigma_s, \Sigma_\perp, \Sigma_{||}$. Numerically differentiate.
-      #The b, b2, bs, alpha0, alpha2, alpha4, N0, N2, N4 terms only need to be marginalised for pre-reconstruction or LPT reconstruction, not WS reconstruction.
-      #So add a huge if statement. Or a separate function call.
-
       ba_fid=compute_b(self,z,sample1)
       bb_fid=compute_b(self,z,sample2)
       b_fid = 0.5*(ba_fid+bb_fid) 
@@ -677,8 +673,7 @@ class fisherForecast(object):
                    'alpha6':0, 'N':N_fid, 'N2':N2_fid, 'N4':0.,
                    'f':-1, 'A_lin':self.A_lin, 'omega_lin':self.omega_lin, 'phi_lin':self.phi_lin,'A_log':self.A_log, 
                    'omega_log':self.omega_log,'phi_log':self.phi_log,'kIR':0.2,
-                   'alpha_parallel': 1., 'alpha_perp': 1., 'ap_deriv': False}#, 
-                   #'sigmaS':sigmaS_fid, 'sigmaPar':sigmaPar_fid, 'sigmaPerp':sigmaPerp_fid}
+                   'alpha_parallel': 1., 'alpha_perp': 1., 'ap_deriv': False}
 
       # if self.experiment.HI: kwargs['N'] = noise # ignores thermal HI noise in deriavtives
 
@@ -770,12 +765,11 @@ class fisherForecast(object):
             param = 'b' ; fNL_flag = True
          if param == 'f': default_value = f_fid
          else: default_value = kwargs[param]
-         print("{} in kwargs, default_value = {}".format(param, default_value))
 
          if param in {'alpha_parallel', 'alpha_perp'}:
             kwargs['ap_deriv'] = True 
 
-            if self.method == 'LPT':
+            if self.recon_method == 'LPT':
                args = {'alpha_parallel': (0.,1.), 'alpha_perp': (1.,0.)}
                return AP_effect(*args[param])
 
@@ -831,55 +825,6 @@ class fisherForecast(object):
          Tb = 188e-3*(self.cosmo.h())/Ez*Ohi*(1+z)**2
          return 2. * ( P_fid - noise  + castorinaPn(z)) / Tb  
 
-      
-
-      # if param in ['alpha_parallel', 'alpha_perp']: 
-
-      #    if self.recon == 'DESI2024':
-      #       """
-      #       For BAO-only forecasting we take derivatives of P_recon not P_True and therefore
-      #       ignore the derivative of the AP volume rescaling and do not marginalise over the 
-      #       broadband polynomials. 
-
-      #       The DESI2024 recon method depend on AP params and requires brute force numerical diff.
-      #       """
-      #       print('self.recon == DESI2024, numerically differentiating Precon with respect to alpha_par/perp')
-            
-      #       default_value = 1. #At fiducial cosmo AP params = 1.
-            
-      #       up = default_value * (1. + relative_step)
-      #       upup = default_value * (1. + 2.*relative_step)
-      #       down = default_value * (1. - relative_step)
-      #       downdown = default_value * (1. - 2.*relative_step)
-      #       step = default_value * relative_step
-
-      #       if param == 'alpha_perp':
-      #          P_dummy_hi = compute_tracer_power_spectrum(**kwargs, a_perp=up, ap_deriv=True)
-      #          P_dummy_higher = compute_tracer_power_spectrum(**kwargs, a_perp=upup, ap_deriv=True)
-      #          P_dummy_low = compute_tracer_power_spectrum(**kwargs, a_perp=down, ap_deriv=True)
-      #          P_dummy_lower = compute_tracer_power_spectrum(**kwargs, a_perp=downdown, ap_deriv=True)
-
-      #       elif param == 'alpha_parallel':
-      #          P_dummy_hi = compute_tracer_power_spectrum(**kwargs, a_par=up, ap_deriv=True)
-      #          P_dummy_higher = compute_tracer_power_spectrum(**kwargs,  a_par=upup, ap_deriv=True)
-      #          P_dummy_low = compute_tracer_power_spectrum(**kwargs, a_par=down, ap_deriv=True)
-      #          P_dummy_lower = compute_tracer_power_spectrum(**kwargs, a_par=downdown, ap_deriv=True)
-
-
-      #       if five_point: dPdtheta = (-P_dummy_higher + 8.*P_dummy_hi - 8.*P_dummy_low + P_dummy_lower) / (12. * step)
-      #       else: dPdtheta = (P_dummy_hi - P_dummy_low) / (2. * step)
-            
-      #       return dPdtheta 
-
-      #    else:
-      #       if param == 'alpha_parallel':
-      #          return AP_effect(0.,1.)
-
-      #       elif param == 'alpha_perp':
-      #          return AP_effect(1.,0.)    
-         
-   
-             
             
       # derivative of early dark energy parameters (Hill+2020)
       if param == 'fEDE' and self.fEDE == 0.:
@@ -1357,8 +1302,8 @@ class fisherForecast(object):
       directory = self.basedir+'output/'+self.name+folder
       basis=self.get_listparams(list(basis),auto_only=auto_only)
 
-      use_polys = (self.method == 'LPT')
-      use_splines = (self.method == 'DESI2024')
+      use_polys = self.recon and (self.recon_method == 'LPT')
+      use_splines = self.recon and (self.recon_method == 'DESI2024')
 
       N = len(basis)
       if use_polys and marg_polys:
@@ -1391,14 +1336,12 @@ class fisherForecast(object):
          
 
          if use_polys and marg_polys:
-            print('marginalising polys')
             for m in range(self.N_polys):
                for j in range(npairs):
                   derivatives[j,zbin_index,npairs*m+j+len(basis)] = self.mu**(2*(m//5)) * self.k**(m%5)
       
          if use_splines and marg_splines:
             counter = self.N_polys*npairs if (use_polys and marg_polys) else 0
-            print('marginalising splines new method')
             mu = self.mu.reshape((self.Nk,self.Nmu))[0,:]
 
             for ell_index, ell in enumerate([0,2,4]):
@@ -1414,13 +1357,6 @@ class fisherForecast(object):
 
                      derivatives[j,zbin_index,param_index] = np.outer(self.splines_array[m], L).ravel() # (Nk, Nmu)
             
-            # l_sum = np.sum(legendre(2*i)(mu) for i in range(3))
-
-            # for m in range(self.N_splines):
-            #    for j in range(npairs):
-            #       derivatives[j,zbin_index,npairs*m+j+len(basis)+counter] = np.outer(self.splines_array[m], l_sum).ravel()
-
-
       if return_auto: 
         idx=[]
         for j in range(npairs):
@@ -1586,8 +1522,8 @@ class fisherForecast(object):
       def fish(zbin_index):
          n = len(basis)
 
-         use_polys = (self.method == 'LPT')
-         use_splines = (self.method == 'DESI2024')
+         use_polys = (self.recon_method == 'LPT')
+         use_splines = (self.recon_method == 'DESI2024')
 
          if use_polys and marg_polys:
             n += self.N_polys*npairs

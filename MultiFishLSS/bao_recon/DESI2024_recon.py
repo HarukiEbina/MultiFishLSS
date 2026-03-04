@@ -64,22 +64,6 @@ class DESI2024_Recon:
         self.ap_deriv = model_params['ap_deriv']
         self.fix_damping = model_params['fix_damping']
 
-
-        print(
-        ' sigmaS = {} \n ' \
-        'sigmaPar = {} \n ' \
-        'sigmaPerp = {} \n ' \
-        'r = {} \n ' \
-        'ba = {} \n ' \
-        'bb = {} \n ' \
-        'f = {} \n ' \
-        'alpha_parallel = {} \n ' \
-        'alpha_perp = {} \n ' \
-        'ap_deriv = {} \n ' \
-        'fix_damping = {}'.format(self.sigmaS,self.sigmaPar,self.sigmaPerp,
-                               model_params['r'],self.ba,self.bb,self.f, 
-                               self.alpha_parallel, self.alpha_perp, self.ap_deriv, self.fix_damping))
-
         self.ells = ells
 
         self.integration = integration
@@ -157,7 +141,6 @@ class DESI2024_Recon:
         """
 
         if self.integration == 'simps':
-            print('Using simpson integration')
             pkell = np.zeros((len(self.ells), len(self.k)))
 
             for i, ell in enumerate(self.ells):
