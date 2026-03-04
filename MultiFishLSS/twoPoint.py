@@ -9,6 +9,9 @@ from scipy.interpolate import InterpolatedUnivariateSpline as Spline
 from scipy.special import legendre
 
 
+from bao_recon.DESI2024_recon import DESI2024_Recon
+
+
 def compute_b(fishcast,z,X=0):
    '''
    Quick way of getting the bias. This is what 
@@ -30,6 +33,35 @@ def compute_n(fishcast, z,samplenumber=0):
    return fishcast.experiment.n[samplenumber](z)
    #return fishcast.experiment.n(z)
 
+def recon_efficiency(fishcast, z, n, ba, bb, f, k0=0.14, mu0=0.6):
+   """
+   Computes reconstruction efficiency according to 
+   "DESI and other Dark Energy experiments in the era of neutrino mass measurements"
+   By interpolating a table across x = n*P_g(k0,mu0)/0.1734.
+
+   Check how shotnoise is computed for cross spectra.
+   """
+   h = fishcast.cosmo.h()
+
+   Pg_k0 = fishcast.cosmo.pk_cb_lin(k0*h,z)*h**3.
+   Pg_k0_mu0 = (ba + f * mu0**2. ) * (bb + f * mu0**2.) * Pg_k0 
+
+   x = n * Pg_k0_mu0/0.1734 
+
+   if x > 10.:
+      return 0.5 
+   
+   elif x < 0.2:
+      return 1.
+
+   else:
+      rs = np.array([1.0, 0.9, 0.8, 0.7, 0.6, 0.55, 0.52, 0.5])
+      xs = np.array([0.2,0.3,0.5,1.,2.,3.,6.,10.])
+
+      r = interp1d(xs,rs,kind='linear',bounds_error=False, fill_value=(1.0, 0.5))
+
+      return r(x)
+   
 def compute_biaspoly(bvec1,bvec2,f=-1,fishcast=None):
     '''
     bvec=(b1,b2,bs,b3 ...,alpha0,alpha2,alpha4,alpha6,sn,sn2,sn4), biases are Lagrangian
@@ -89,7 +121,7 @@ def get_biaspoly(fishcast,X,Y,z,b=-1, b2=-1, bs=-1,
    elif bsa == -1: bsa = -2*(ba-1)/7
    if bsb==-1 and exp.bs is not None: bsb = exp.bs[Y](z)
    elif bsb == -1: bsb = -2*(bb-1)/7
-       
+      
    if bL1a is None: bL1a = ba-1
    if bL1b is None: bL1b = bb-1
    if bL2a is None: bL2a = b2a - 8*(ba-1)/21
@@ -158,7 +190,7 @@ def compute_matter_power_spectrum(fishcast, z, linear=False):
    return np.repeat(pmatter,fishcast.Nmu)
 
 
-def get_smoothed_p(fishcast,z,klin,plin,division_factor=2.):
+def get_smoothed_p(fishcast,klin,plin,division_factor=2.):
    '''
    Returns a power spectrum without wiggles, given by:
       P_nw = P_approx * F[P/P_approx]
@@ -195,6 +227,8 @@ def get_smoothed_p(fishcast,z,klin,plin,division_factor=2.):
                                          int(fishcast.Nk/division_factor)%2, 6)*p_approx
    return psmooth
 
+
+
 def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1, 
                                   alpha0=-1, alpha2=-1, alpha4=-1,alpha6=0.,
                                   N=None,N2=-1,N4=0.,f=-1., A_lin=-1., 
@@ -204,6 +238,7 @@ def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1,
                                   one_loop=True,ba=-1.,bb=-1.,b2a=-1.,b2b=-1.,bsa=-1.,bsb=-1.,
                                   bL1a=None,bL1b=None,bL2a=None,bL2b=None,bLsa=None,bLsb=None,
                                   alpha0a=-1,alpha0b=-1,alpha2a=0,alpha2b=0,alpha4a=0,alpha4b=0,
+                                  alpha_perp=None, alpha_parallel=None, ap_deriv=False, sigmaS=None, sigmaPar=None, sigmaPerp=None,
                                   ell_mult = None):
    '''
    Computes the nonlinear redshift-space power spectrum P(k,mu) [Mpc/h]^3 
@@ -216,9 +251,28 @@ def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1,
    bpoly=get_biaspoly(fishcast,Xind,Yind,z,b,b2,bs,alpha0,alpha2,alpha4,alpha6,
                    N,N2,N4,bL1,bL2,bLs,ba,bb,b2a,b2b,bsa,bsb,bL1a,bL1b,bL2a,bL2b,bLsa,bLsb,
                    alpha0a,alpha0b,alpha2a,alpha2b,alpha4a,alpha4b)
-   if fishcast.recon: 
-      return compute_recon_power_spectrum(fishcast,z,bpoly)
+   
    if f == -1.: f = fishcast.cosmo.scale_independent_growth_factor_f(z)
+   
+   if fishcast.recon:
+      model_params = {'alpha_perp': alpha_perp, 'alpha_parallel':alpha_parallel, 'ap_deriv': ap_deriv, 
+                   'sigmaS': sigmaS, 'sigmaPar': sigmaPar, 'sigmaPerp': sigmaPerp, 
+                   'f':f, 'ba': None, 'bb': None, 'r': None}
+      
+      if b != -1: 
+         model_params['ba'] = b
+         model_params['bb'] = b
+      else:
+         if ba==-1: ba = compute_b(fishcast,z,Xind)
+         if bb==-1: bb = compute_b(fishcast,z,Yind)
+
+         model_params['ba'] = ba 
+         model_params['bb'] = bb
+
+      model_params['fix_damping'] = fishcast.fix_damping
+
+      return compute_recon_power_spectrum(fishcast,z,Xind, Yind, bpoly, moments, model_params)
+   
    if A_lin == -1.: A_lin = fishcast.A_lin
    if omega_lin == -1.: omega_lin = fishcast.omega_lin
    if phi_lin == -1.: phi_lin = fishcast.phi_lin 
@@ -271,6 +325,7 @@ def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1,
    p0 = np.sum(lpt.p0ktable * bpoly,axis=1)# + sn + 1./3 * kv**2 * sn2 + 1./5 * kv**4 * sn4
    p2 = np.sum(lpt.p2ktable * bpoly,axis=1)# + 2 * kv**2 * sn2 / 3 + 4./7 * kv**4 * sn4
    p4 = np.sum(lpt.p4ktable * bpoly,axis=1)# + 8./35 * kv**4 * sn4
+   
    if moments: return k,p0,p2,p4
    p0 = np.repeat(p0,fishcast.Nmu) 
    p2 = np.repeat(p2,fishcast.Nmu) 
@@ -489,25 +544,89 @@ def compute_lensing_Cell(fishcast, X, Y, zmin=None, zmax=None,zmid=None,gamma=1.
     
 
 #def compute_recon_power_spectrum(fishcast,z,b=-1.,b2=-1.,bs=-1.,N=None):
-def compute_recon_power_spectrum(fishcast,z,bpoly):
+def compute_recon_power_spectrum(fishcast,z,Xind, Yind, bpoly, moments, model_params):
+
+   '''
+   Returns reconstructed power spectrum based on the DESI wiggle-split method 
+   or Stephen's LPT reconstruction.
+
+   From Eq. 3.20 of Noah's paper P_obs = a_{||}^{-1} a_\perp^{-2} * P_recon + N, N=1/shot noise. Here N = c_00 is technically 
+   one term from the broadband polynomials but all other c_ij are zero. The a_{||}^{-1} a_\perp^{-2} prefactor enters into the derivative calculation in fisherForecast.py
+
+   From Eq. 6.13 of DESI 2024 BAO comparison paper, P_obs_ell is exactly what I output in wiggle_split_recon_power_spectrum. 
+
+   '''
+
+   K,MU = fishcast.k,fishcast.mu
+   h = fishcast.cosmo.h()
+
+   klin = np.logspace(np.log10(min(K)),np.log10(max(K)),fishcast.Nk)
+   #klin = np.array([K[i*fishcast.Nmu] for i in range(fishcast.Nk)]) #Why were we using a different k grid than the pre-reconstruction case?
+
+   mulin = MU.reshape((fishcast.Nk,fishcast.Nmu))[0,:]
+
+   plin = np.array([fishcast.cosmo.pk_cb_lin(k*h,z)*h**3. for k in klin])
+
+   if fishcast.recon_method == 'LPT':
+      p0, p2, p4 = LPT_recon_power_spectrum(fishcast,z,bpoly, klin, plin, f=model_params['f'])
+      
+   elif fishcast.recon_method == 'DESI2024':
+
+      ba = model_params['ba']
+      bb = model_params['bb']
+
+      n = np.sqrt(compute_n(fishcast,z,Xind) * compute_n(fishcast,z,Yind))
+
+      model_params['r'] = recon_efficiency(fishcast,z=z,n=n,ba=ba,bb=bb,f=model_params['f'])
+      
+      sigmaS, sigmaPar, sigmaPerp = fishcast.compute_recon_sigmas(z, model_params)
+
+      model_params['sigmaS'] = sigmaS
+      model_params['sigmaPar'] = sigmaPar 
+      model_params['sigmaPerp'] = sigmaPerp
+
+      p0, p2, p4 = DESI2024_recon_power_spectrum(fishcast,z, klin, mulin, plin, model_params)
+   
+   else:
+      raise Exception('recon method not recognized')
+
+   if moments:
+      return p0, p2, p4
+
+   l0,l2,l4 = legendre(0),legendre(2),legendre(4)
+
+   Pk = lambda mu: p0*l0(mu) + p2*l2(mu) + p4*l4(mu)
+
+   result = np.array([Pk(mu) for mu in mulin]).T
+
+   N = bpoly[16]
+
+   return result.flatten() + N
+      
+   
+def DESI2024_recon_power_spectrum(fishcast,z, klin, mulin, plin, model_params):
+   '''
+   Returns the reconstructed power spectrum, following the DESI wiggle-split method.
+   '''   
+   desi2024 = DESI2024_Recon(fishcast=fishcast,z=z,k=klin,mu=mulin,plin=plin, model_params=model_params)
+
+   return desi2024.compute()
+
+
+def LPT_recon_power_spectrum(fishcast,z,bpoly, klin, plin, f):
    '''
    Returns the reconstructed power spectrum, following Stephen's paper.
    '''
    bias_factors = bpoly[:13]
-   N = bpoly[16]
+
    bias_factors[10]=0;bias_factors[11]=0;bias_factors[12]=0;
-   noise = 1/compute_n(fishcast,z)
+
+   K = fishcast.k
+
    # if fishcast.experiment.HI: print('not set up yet')#noise = castorinaPn(z)
    #if N is None: N = 1/compute_n(fishcast,z)
-   f = fishcast.cosmo.scale_independent_growth_factor_f(z) 
-    
-   K,MU = fishcast.k,fishcast.mu
-   # h = fishcast.params['h']
-   h = fishcast.cosmo.h()
-   klin = np.logspace(np.log10(min(K)),np.log10(max(K)),fishcast.Nk)
-   mulin = MU.reshape((fishcast.Nk,fishcast.Nmu))[0,:]
-   plin = np.array([fishcast.cosmo.pk_cb_lin(k*h,z)*h**3. for k in klin])
-    
+   #f = fishcast.cosmo.scale_independent_growth_factor_f(z) 
+ 
    zelda = Zeldovich_Recon(klin,plin,R=15,N=2000,jn=5)
 
    kSparse,p0ktable,p2ktable,p4ktable = zelda.make_pltable(f,ngauss=3,kmin=min(K),kmax=max(K),nk=200,method='RecSym')
@@ -516,7 +635,5 @@ def compute_recon_power_spectrum(fishcast,z,bpoly):
    p2Sparse = np.sum(p2ktable*bias_factors, axis=1)
    p4Sparse = np.sum(p4ktable*bias_factors, axis=1)
    p0,p2,p4 = Spline(kSparse,p0Sparse)(klin),Spline(kSparse,p2Sparse)(klin),Spline(kSparse,p4Sparse)(klin)
-   l0,l2,l4 = legendre(0),legendre(2),legendre(4)
-   Pk = lambda mu: p0*l0(mu) + p2*l2(mu) + p4*l4(mu)
-   result = np.array([Pk(mu) for mu in mulin]).T
-   return result.flatten() + N
+   
+   return p0, p2, p4

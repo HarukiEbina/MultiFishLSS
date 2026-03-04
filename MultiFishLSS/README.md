@@ -8,4 +8,4 @@
 
 #### Subdirectories
 * `input/` contains CMB fisher matrices, CMB lensing noise curves, assumed fiducial reionization history, and fiducial values for the matter counterterms
-* `bao_recon/` is a copy of [ZeldovichReconPk](https://github.com/sfschen/ZeldovichReconPk), is used to compute the reconstructed power spectrum, and is wrapped in `twoPoint.py`
+* `bao_recon/` includes a copy of [ZeldovichReconPk](https://github.com/sfschen/ZeldovichReconPk) and the [DESI 2024 BAO reconstruction method](https://arxiv.org/abs/2402.14070), is used to compute the reconstructed power spectrum, and is wrapped in `twoPoint.py`
