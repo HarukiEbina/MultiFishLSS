@@ -1,4 +1,5 @@
 from headers import *
+
 from twoPoint import *
 from twoPointNoise import *
 from multiprocessing import Pool
@@ -54,6 +55,7 @@ class fisherForecast(object):
                 fix_damping=True,
                 recon_sigmas=None,#{'sigmaS':2., 'sigmaPar':5., 'sigmaPerp':2.},
                 sigmaS_default=2.,
+                N_splines=10,
                 ell=np.arange(10,1000,1),
                 N2cut=0.2,
                 setup=True,
@@ -110,13 +112,6 @@ class fisherForecast(object):
       self.mu = np.tile(mu,self.Nk)
       self.dmu = np.tile(dmu,self.Nk)
 
-      self.N_splines = 7 #per multipole
-      self.splines_array = None
-      self.N_polys = 15 #total
-
-      if self.recon_method == 'DESI2024':
-          self.initialise_splines()
-
       # we set these up later
       self.experiment = None     # 
       self.cosmo = None          # CLASS object
@@ -135,6 +130,24 @@ class fisherForecast(object):
          print('Attempted to create a forecast without an experiment or cosmology.')     
       else:
          self.set_experiment_and_cosmology_specific_parameters(experiment, cosmo, cosmo_fid)
+      
+      self.N_splines = N_splines #Number of splines per multipole
+
+      kmax_zmax = 1./np.sqrt(self.Sigma2(self.experiment.zcenters[-1]))
+      N_sp_pred = int(np.ceil(kmax_zmax/0.06))+1      # num splines required to cover largest k-range given scale of 0.06 as implemented in self.initialise_splines()
+
+      if self.N_splines < N_sp_pred: 
+         self.N_splines = N_sp_pred
+
+         if recon_method == 'DESI2024':
+            print("Not enough splines for DESI2024 recon method, setting N_splines = {}".format(self.N_splines))
+
+
+      self.splines_array = None
+      self.N_polys = 15 #total
+
+      if self.recon_method == 'DESI2024':
+          self.initialise_splines()
       
       self.sigma_nl0 = np.sqrt(self.Sigma2(0))
       
@@ -910,6 +923,7 @@ class fisherForecast(object):
 
          if self.AP: result += AP_effect(daperpdp,dapardp)
          if flag: result *= self.params['A_s']
+
          return result
 
       # defaults to a two sided derivative
@@ -1250,7 +1264,7 @@ class fisherForecast(object):
                     #else:
                     #   continue
             
-            
+           
    def check_derivatives(self):
       '''
       Plots all the derivatives in the output/forecast name/derivatives directory
@@ -1498,7 +1512,7 @@ class fisherForecast(object):
 
    def gen_fisher(self,basis,globe,log10z_c=-1.,omega_lin=-1.,omega_log=-1.,kmax_knl=1.,
                   kmin=0.003,kmax=-10.,kpar_min=-1.,mu_min=-1,derivatives=None,
-                  zbins=None,marg_polys=True, marg_splines=True,simpson=False,nratio=1.,auto_only=False,fskyratio=1.):
+                  zbins=None,marg_polys=True, marg_splines=True,spline_prior=1e4,simpson=False,nratio=1.,auto_only=False,fskyratio=1.):
       '''
       Computes an array of Fisher matrices, one for each redshift bin.
       '''
@@ -1522,8 +1536,8 @@ class fisherForecast(object):
       def fish(zbin_index):
          n = len(basis)
 
-         use_polys = (self.recon_method == 'LPT')
-         use_splines = (self.recon_method == 'DESI2024')
+         use_polys = self.recon and (self.recon_method == 'LPT')
+         use_splines = self.recon and (self.recon_method == 'DESI2024')
 
          if use_polys and marg_polys:
             n += self.N_polys*npairs
@@ -1542,6 +1556,13 @@ class fisherForecast(object):
          if kpar_min > 0: constraints *= (kpar>kpar_min)
          if mu_min > 0: constraints *= (kpar > kperp*mu_min/np.sqrt(1-mu_min**2))
          F=np.einsum('c,aic,cab,bjc,ac,bc->ij',constraints,dPdvecp,Cinv,dPdvecp,self.kpar_cut[autoidx,:,:][:,zbin_index,:], self.kpar_cut[autoidx,:,:][:,zbin_index,:])
+
+         ## Add prior on splines amplitudes to regularise matrix and prevent singularities if using very low k-range or z.
+
+         if use_splines and marg_splines:
+            idx = np.arange(len(basis), n)
+            F[idx, idx] += 1. / spline_prior**2
+
          return F
 
       fishers = [fish(zbin_index) for zbin_index in zbins]
@@ -1610,7 +1631,7 @@ class fisherForecast(object):
                 result[i+n*nsamples+j*n] = np.genfromtxt(self.basedir+'output/'+self.name+'/derivatives_Cl/'+filename)
       return result
 
-    
+   
    def gen_lensing_fisher(self,basis,globe,ell_min=30,ell_max=None,kmax_knl=1,
                           CMB='SO',kk=True,only_kk=False,bins=None,fsky_CMB=0.4,
                           fsky_intersect=None,auto_only=False,nratio=1.,fskyratio=1.,no_kg=False):
