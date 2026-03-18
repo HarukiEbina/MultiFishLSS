@@ -61,7 +61,7 @@ class fisherForecast(object):
                 setup=True,
                 overwrite=False,
                 basedir=''):
-        
+       
       # some basic stuff for the k-mu grid  
       self.kmin = kmin
       self.kmax = kmax
@@ -133,14 +133,17 @@ class fisherForecast(object):
       
       self.N_splines = N_splines #Number of splines per multipole
 
-      kmax_zmax = 1./np.sqrt(self.Sigma2(self.experiment.zcenters[-1]))
-      N_sp_pred = int(np.ceil(kmax_zmax/0.06))+1      # num splines required to cover largest k-range given scale of 0.06 as implemented in self.initialise_splines()
+      knl_zmax = 1./np.sqrt(self.Sigma2(self.experiment.zcenters[-1]))
+      N_splines_pr = int(np.ceil(knl_zmax/0.06))+1      # num splines required to cover largest k-range given scale of 0.06 as implemented in self.initialise_splines()
 
-      if self.N_splines < N_sp_pred: 
-         self.N_splines = N_sp_pred
+      if self.N_splines < N_splines_pr: 
+         self.N_splines = N_splines_pr
 
          if recon_method == 'DESI2024':
-            print("Not enough splines for DESI2024 recon method, setting N_splines = {}".format(self.N_splines))
+            #If user-specified num splines is too low, broadband info will leak into constraints. Therefore, set N_splines to overestimate of 
+            #N splines at highest redshift bin. By adding a broad prior to the spline amplitudes in gen_fisher we avoid any singular
+            #behaviour from doing this and retain unaffected constraints on forecasted parameters.
+            print("Setting N_splines = {}".format(self.N_splines))
 
 
       self.splines_array = None
@@ -771,11 +774,7 @@ class fisherForecast(object):
          res -= K*(dapardp*MU**2 + daperpdp*(1-MU**2))*self.dPdk(P_fid)
          return res
 
-         
-      if param in kwargs or param == 'f_NL': 
-         fNL_flag = False
-         if param == 'f_NL': 
-            param = 'b' ; fNL_flag = True
+      if param in kwargs: 
          if param == 'f': default_value = f_fid
          else: default_value = kwargs[param]
 
@@ -804,21 +803,58 @@ class fisherForecast(object):
             P_dummy_higher = compute_tracer_power_spectrum(**kwargs)
             kwargs[param] = downdown
             P_dummy_lower = compute_tracer_power_spectrum(**kwargs)
-         kwargs[param] = default_value
          if five_point: dPdtheta = (-P_dummy_higher + 8.*P_dummy_hi - 8.*P_dummy_low + P_dummy_lower) / (12. * step)
          else: dPdtheta = (P_dummy_hi - P_dummy_low) / (2. * step)
-         if fNL_flag:
-            D = 0.76 * self.cosmo.scale_independent_growth_factor(z) # normalized so D(a) = a in the MD era
-            # brute force way of getting the transfer function, normalized to 1 at kmin
-            pmatter = compute_matter_power_spectrum(self, z, linear=True)
-            T = np.sqrt(pmatter/self.k**self.params['n_s'])
-            T /= T[0]
-            fNL_factor = 3.*1.68*(b_fid-1.)*((self.params['omega_cdm']+self.params['omega_b'])/\
-                                              self.cosmo.h()**2.)*100.**2.
-            fNL_factor /= D * self.k**2. * T * 299792.458**2.
-            dPdtheta *= fNL_factor
          return dPdtheta
- 
+
+      if param == 'f_NL':
+         result = 0.
+
+         D = 0.76 * self.cosmo.scale_independent_growth_factor(z) # normalized so D(a) = a in the MD era
+         # brute force way of getting the transfer function, normalized to 1 at kmin
+         pmatter = compute_matter_power_spectrum(self, z, linear=True)
+         T = np.sqrt(pmatter/self.k**self.params['n_s'])
+         T /= T[0]
+         fNL_factor_no_bfid = 3.*1.68*((self.params['omega_cdm']+self.params['omega_b'])/\
+                                             self.cosmo.h()**2.)*100.**2.
+         fNL_factor_no_bfid /= D * self.k**2. * T * 299792.458**2.
+
+         for bi in ['ba','bb']:
+            param = bi
+            default_value = kwargs[param]
+
+            up = default_value*(1+relative_step)
+            if default_value == 0: up = absolute_step
+            down = default_value*(1-relative_step)
+            if default_value == 0: down = -absolute_step
+            upup = default_value*(1+2*relative_step)
+            if default_value == 0: upup = 2*absolute_step
+            downdown = default_value*(1-2*relative_step)
+            if default_value == 0: downdown = -2*absolute_step
+            step = up - default_value
+            kwargs[param] = up
+            P_dummy_hi = compute_tracer_power_spectrum(**kwargs)
+            kwargs[param] = down
+            P_dummy_low = compute_tracer_power_spectrum(**kwargs)
+            if five_point:
+               kwargs[param] = upup
+               P_dummy_higher = compute_tracer_power_spectrum(**kwargs)
+               kwargs[param] = downdown
+               P_dummy_lower = compute_tracer_power_spectrum(**kwargs)
+
+            kwargs[param] = default_value
+
+            if five_point: dPdtheta_i = (-P_dummy_higher + 8.*P_dummy_hi - 8.*P_dummy_low + P_dummy_lower) / (12. * step)
+            else: dPdtheta_i = (P_dummy_hi - P_dummy_low) / (2. * step)
+
+            bi_fid = kwargs[param]
+            fNL_factor_i = fNL_factor_no_bfid * (bi_fid-1.)
+
+            result += dPdtheta_i * fNL_factor_i
+         
+         return result
+
+
       if param == 'RT':
          K,MU = self.k,self.mu
          # h = self.params['h']
