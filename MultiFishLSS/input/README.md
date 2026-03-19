@@ -9,3 +9,7 @@ The remaining files are CMB Fisher matrices in the basis
 Planck_SO combines low-ell Planck (ell < 30) with high-ell SO (ell > 30), and so on.
 
 `alpha0k_fit.json` provides fits to the nonlinear matter power spectrum, which can be used as fiducial values for the matter counterterm.
+
+`b2_ST.json` provides the second-order bias as a function of the linear bias, evaluated using the Sheth-Tormen peak-background split. The function is additionally extrapolated to lower bias than allowed by peak-background splits to forecast low-bias tracers. This is used as a fiducial relation between b1 and b2 in the forecasts.
+
+If necessary, the extrapolation range of $b_2$ can be expanded by modifying and re-running `sheth_tormen.py`.

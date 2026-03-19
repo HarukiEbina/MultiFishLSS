@@ -450,7 +450,6 @@ class fisherForecast(object):
       biases = ['b','b2','bs']
       Ns = ['N','N2','N4']
       alphas =['alpha0','alpha2','alpha4']
-      bidx=None; b2idx=None; bsidx=None
       
       for param in biases: 
           try: idx=listparams.index(param)

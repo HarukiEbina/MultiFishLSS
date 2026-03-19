@@ -68,34 +68,19 @@ class experiment(object):
               count+=nsample-i
           ind2=index-count+ind1
           return ind1,ind2
-      def find_b2_ST(z,i):
-          '''
-          Use Sheth-Tormen peak-background split to find b2 from b1
-          '''
-          bL1 = self.b[i](z)-1
-          a=.707; p=.3; dc=1.686
-          def get_ST_nu2(nu2,bL1):
-              return a*nu2-1+2*p/(1+(a*nu2)**p)-dc*bL1
-          nu2_ST = fsolve(get_ST_nu2, 5, args=(bL1))[0]
-          bL2_ST = (a**2*nu2_ST**2-3*a*nu2_ST+2*p*(2*a*nu2_ST+2*p-1)/(1+(a*nu2_ST)**p))/dc**2
-          return bL2_ST+8/21*bL1
+      
+      with open(os.path.join(MFISHLSS_BASE, "input/b2_ST.json"), "r") as read_file:
+            b2_ST = json.load(read_file)
+
       self.b2 = b2
       if self.b2 is None:
             self.b2=[]
             for i in range(nsample):
-#                 self.b2.append(lambda z,i=i:8*(b[i](z)-1)/21)
-                self.b2.append(lambda z,i=i:find_b2_ST(z,i))
+                self.b2.append(lambda z,i=i:interp1d(b2_ST['b1'], b2_ST['b2'], kind='linear', bounds_error=True)(self.b[i](z)))
+                
+
       self.bs = bs
-      '''if self.bs is None:
-            self.bs=[]
-            for i in range(nsample):
-                self.bs.append(lambda z:-2*(self.b[i](z)-1)/7)'''
       self.alpha0 = alpha0
-#       if self.alpha0 is None:
-#             self.alpha0=[]
-#             for i in range(npair):
-#                 s1,s2=index2sample(i)
-#                 self.alpha0.append(lambda z,s1=s1,s2=s2: 1.22 + 0.24*self.b[s1](z)*self.b[s2](z)*(z-5.96) if z<6 else 0.)  
       if self.alpha0 is None:
             self.alpha0=[]
             for i in range(nsample):
