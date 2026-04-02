@@ -260,11 +260,10 @@ def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1,
    if b2!=-1 and (b2a!=-1 or b2b!=-1):print('both b2 and b2a, b2b provided')
    if bs!=-1 and (bsa!=-1 or bsb!=-1):print('both bs and bsa, bsb provided')
    exp = fishcast.experiment
+   if f == -1.: f = fishcast.cosmo.scale_independent_growth_factor_f(z)
    bpoly=get_biaspoly(fishcast,Xind,Yind,z,b,b2,bs,alpha0,alpha2,alpha4,alpha6,
                    N,N2,N4,bL1,bL2,bLs,ba,bb,b2a,b2b,bsa,bsb,bL1a,bL1b,bL2a,bL2b,bLsa,bLsb,
-                   alpha0a,alpha0b,alpha2a,alpha2b,alpha4a,alpha4b)
-   
-   if f == -1.: f = fishcast.cosmo.scale_independent_growth_factor_f(z)
+                   alpha0a,alpha0b,alpha2a,alpha2b,alpha4a,alpha4b,f=f)
    
    if fishcast.recon:
       model_params = {'alpha_perp': alpha_perp, 'alpha_parallel':alpha_parallel, 'ap_deriv': ap_deriv, 
