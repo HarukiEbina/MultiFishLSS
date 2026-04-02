@@ -229,7 +229,19 @@ def get_smoothed_p(fishcast,klin,plin,division_factor=2.):
 
 
 
-def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1, 
+def compute_lpt_tables(klin, plin, f, kIR=0.2, one_loop=True):
+   """
+   Compute velocileptors LPT tables for a given linear power spectrum and growth
+   rate f.  Returns a tuple (kv, p0ktable, p2ktable, p4ktable) that can be passed
+   to compute_tracer_power_spectrum via lpt_tables= to avoid rebuilding the LPT
+   decomposition when only bias parameters (or the tracer pair) change.
+   """
+   lpt = LPT_RSD(klin, plin, kIR=kIR, one_loop=one_loop, cutoff=2)
+   lpt.make_pltable(f, kmin=min(klin), kmax=max(klin), nk=len(klin))
+   return lpt.kv, lpt.p0ktable, lpt.p2ktable, lpt.p4ktable
+
+
+def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1,
                                   alpha0=-1, alpha2=-1, alpha4=-1,alpha6=0.,
                                   N=None,N2=-1,N4=0.,f=-1., A_lin=-1., 
                                   omega_lin=-1., phi_lin=-1.,A_log=-1., 
@@ -239,7 +251,7 @@ def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1,
                                   bL1a=None,bL1b=None,bL2a=None,bL2b=None,bLsa=None,bLsb=None,
                                   alpha0a=-1,alpha0b=-1,alpha2a=0,alpha2b=0,alpha4a=0,alpha4b=0,
                                   alpha_perp=None, alpha_parallel=None, ap_deriv=False, sigmaS=None, sigmaPar=None, sigmaPerp=None,
-                                  ell_mult = None):
+                                  ell_mult=None, lpt_tables=None):
    '''
    Computes the nonlinear redshift-space power spectrum P(k,mu) [Mpc/h]^3 
    of the matter tracer. Returns an array of length Nk*Nmu. 
@@ -281,60 +293,59 @@ def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1,
 
    K = fishcast.k
    MU = fishcast.mu
-   # h = fishcast.params['h']
-   h = fishcast.cosmo.h()
-   klin = np.array([K[i*fishcast.Nmu] for i in range(fishcast.Nk)])
-   plin = np.array([fishcast.cosmo.pk_cb_lin(k*h,z)*h**3. for k in klin]) 
-   prim_feat_fac =  1. + A_lin * np.sin(omega_lin * klin + phi_lin)
-   prim_feat_fac += A_log * np.sin(omega_log * np.log(klin*h/0.05)  + phi_log)
-   plin *= prim_feat_fac
 
+   if lpt_tables is None:
+      # h = fishcast.params['h']
+      h = fishcast.cosmo.h()
+      klin = np.array([K[i*fishcast.Nmu] for i in range(fishcast.Nk)])
+      plin = np.array([fishcast.cosmo.pk_cb_lin(k*h,z)*h**3. for k in klin])
+      prim_feat_fac =  1. + A_lin * np.sin(omega_lin * klin + phi_lin)
+      prim_feat_fac += A_log * np.sin(omega_log * np.log(klin*h/0.05)  + phi_log)
+      plin *= prim_feat_fac
 
-   if fishcast.smooth: plin = get_smoothed_p(fishcast,z)
-    
-   if fishcast.linear2:
-      print('forecast.linear2 deprecated')
-      pmatter = np.repeat(plin,fishcast.Nmu)
-      result = pmatter * (b+f*MU**2.)**2.
-      result /= 1 - N2*(K*MU)**2/noise 
-      result += N   
-      return result
+      if fishcast.smooth: plin = get_smoothed_p(fishcast,z)
 
+      if fishcast.linear2:
+         print('forecast.linear2 deprecated')
+         pmatter = np.repeat(plin,fishcast.Nmu)
+         result = pmatter * (b+f*MU**2.)**2.
+         result /= 1 - N2*(K*MU)**2/noise
+         result += N
+         return result
 
-   if fishcast.linear:
-      print('forecast.linear deprecated')
-      # If not using velocileptors, use linear theory
-      # and approximate RSD with Kaiser.
-      if b!=-1:
-            ba=b; bb=b;
-      if ba==-1:ba = compute_b(fishcast,z,Xind)
-      if bb==-1:bb = compute_b(fishcast,z,Yind)
-      if N is None: N = bpoly[16]
-      if N2 == -1: N2 = bpoly[17]
-      
-      if alpha0 ==-1: alpha0=bpoly[12]
-      pmatter = np.repeat(plin,fishcast.Nmu)
-      result = pmatter * (ba+f*MU**2.)*(bb+f*MU**2)
-      result += N+N2*(K*MU)**2+N4*(K*MU)**4
-      result += pmatter*K**2*(alpha0+alpha2*MU**2+alpha4*MU**4)
-      return result
+      if fishcast.linear:
+         print('forecast.linear deprecated')
+         # If not using velocileptors, use linear theory
+         # and approximate RSD with Kaiser.
+         if b!=-1:
+               ba=b; bb=b;
+         if ba==-1:ba = compute_b(fishcast,z,Xind)
+         if bb==-1:bb = compute_b(fishcast,z,Yind)
+         if N is None: N = bpoly[16]
+         if N2 == -1: N2 = bpoly[17]
 
-   lpt = LPT_RSD(klin,plin,kIR=kIR,one_loop=one_loop,cutoff=2)
-   lpt.make_pltable(f,kmin=min(klin),kmax=max(klin),nk=len(klin))
-   k = lpt.kv
-   p0 = np.sum(lpt.p0ktable * bpoly,axis=1)# + sn + 1./3 * kv**2 * sn2 + 1./5 * kv**4 * sn4
-   p2 = np.sum(lpt.p2ktable * bpoly,axis=1)# + 2 * kv**2 * sn2 / 3 + 4./7 * kv**4 * sn4
-   p4 = np.sum(lpt.p4ktable * bpoly,axis=1)# + 8./35 * kv**4 * sn4
-   
-   if moments: return k,p0,p2,p4
-   p0 = np.repeat(p0,fishcast.Nmu) 
-   p2 = np.repeat(p2,fishcast.Nmu) 
+         if alpha0 ==-1: alpha0=bpoly[12]
+         pmatter = np.repeat(plin,fishcast.Nmu)
+         result = pmatter * (ba+f*MU**2.)*(bb+f*MU**2)
+         result += N+N2*(K*MU)**2+N4*(K*MU)**4
+         result += pmatter*K**2*(alpha0+alpha2*MU**2+alpha4*MU**4)
+         return result
+
+      lpt_tables = compute_lpt_tables(klin, plin, f, kIR=kIR, one_loop=one_loop)
+
+   kv, p0ktable, p2ktable, p4ktable = lpt_tables
+   p0 = np.sum(p0ktable * bpoly,axis=1)
+   p2 = np.sum(p2ktable * bpoly,axis=1)
+   p4 = np.sum(p4ktable * bpoly,axis=1)
+
+   if moments: return kv,p0,p2,p4
+   p0 = np.repeat(p0,fishcast.Nmu)
+   p2 = np.repeat(p2,fishcast.Nmu)
    p4 = np.repeat(p4,fishcast.Nmu)
    pkmu = p0+0.5*(3*MU**2-1)*p2+0.125*(35*MU**4-30*MU**2+3)*p4
    if ell_mult == 0: pkmu = p0
    elif ell_mult == 2: pkmu = 0.5*(3*MU**2-1)*p2
    elif ell_mult == 4: pkmu = 0.125*(35*MU**4-30*MU**2+3)*p4
-   del lpt
    return pkmu
 
 def compute_real_space_cross_power(fishcast, X, Y, z, gamma=1., b=-1., 
