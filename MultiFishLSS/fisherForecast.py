@@ -763,22 +763,45 @@ class fisherForecast(object):
           elif alpha4idx==sample2: param='alpha4b'
           else: print('error alpha4', X, Y, param)
 
-      P_fid = compute_tracer_power_spectrum(**kwargs)
+      # For pure bias/nuisance params, plin and f are constant across stencil
+      # points — build LPT tables once and pass them to every stencil call.
+      # Excluded: 'f' (enters make_pltable directly), AP params (take a
+      # different code path), primordial-feature params (change plin), and
+      # recon (uses a separate solver).
+      _plin_varying = {'f', 'alpha_parallel', 'alpha_perp',
+                       'A_lin', 'omega_lin', 'phi_lin',
+                       'A_log', 'omega_log', 'phi_log'}
+      _lpt_tables = None
+      if param in kwargs and param not in _plin_varying and not self.recon:
+         h = self.cosmo.h()
+         klin = np.array([self.k[i*self.Nmu] for i in range(self.Nk)])
+         if self.smooth:
+            plin = get_smoothed_p(self, z)
+         else:
+            plin = np.array([self.cosmo.pk_cb_lin(k*h, z)*h**3. for k in klin])
+            prim_feat_fac  = 1. + kwargs.get('A_lin', self.A_lin) * np.sin(kwargs.get('omega_lin', self.omega_lin) * klin + kwargs.get('phi_lin', self.phi_lin))
+            prim_feat_fac += kwargs.get('A_log', self.A_log) * np.sin(kwargs.get('omega_log', self.omega_log) * np.log(klin*h/0.05) + kwargs.get('phi_log', self.phi_log))
+            plin *= prim_feat_fac
+         f_val = kwargs.get('f', -1)
+         if f_val == -1: f_val = self.cosmo.scale_independent_growth_factor_f(z)
+         _lpt_tables = compute_lpt_tables(klin, plin, f_val, kIR=kwargs.get('kIR', 0.2))
+
+      P_fid = compute_tracer_power_spectrum(**kwargs, lpt_tables=_lpt_tables)
 
       def AP_effect(daperpdp,dapardp):
          K,MU = self.k,self.mu
-         
+
          res = -(dapardp+2*daperpdp)*P_fid
          res -= MU*(1-MU**2)*(dapardp-daperpdp)*self.dPdmu(P_fid)
          res -= K*(dapardp*MU**2 + daperpdp*(1-MU**2))*self.dPdk(P_fid)
          return res
 
-      if param in kwargs: 
+      if param in kwargs:
          if param == 'f': default_value = f_fid
          else: default_value = kwargs[param]
 
          if param in {'alpha_parallel', 'alpha_perp'}:
-            kwargs['ap_deriv'] = True 
+            kwargs['ap_deriv'] = True
 
             if self.recon_method == 'LPT':
                args = {'alpha_parallel': (0.,1.), 'alpha_perp': (1.,0.)}
@@ -794,14 +817,14 @@ class fisherForecast(object):
          if default_value == 0: downdown = -2*absolute_step
          step = up - default_value
          kwargs[param] = up
-         P_dummy_hi = compute_tracer_power_spectrum(**kwargs)
+         P_dummy_hi = compute_tracer_power_spectrum(**kwargs, lpt_tables=_lpt_tables)
          kwargs[param] = down
-         P_dummy_low = compute_tracer_power_spectrum(**kwargs)
+         P_dummy_low = compute_tracer_power_spectrum(**kwargs, lpt_tables=_lpt_tables)
          if five_point:
             kwargs[param] = upup
-            P_dummy_higher = compute_tracer_power_spectrum(**kwargs)
+            P_dummy_higher = compute_tracer_power_spectrum(**kwargs, lpt_tables=_lpt_tables)
             kwargs[param] = downdown
-            P_dummy_lower = compute_tracer_power_spectrum(**kwargs)
+            P_dummy_lower = compute_tracer_power_spectrum(**kwargs, lpt_tables=_lpt_tables)
          if five_point: dPdtheta = (-P_dummy_higher + 8.*P_dummy_hi - 8.*P_dummy_low + P_dummy_lower) / (12. * step)
          else: dPdtheta = (P_dummy_hi - P_dummy_low) / (2. * step)
          return dPdtheta
