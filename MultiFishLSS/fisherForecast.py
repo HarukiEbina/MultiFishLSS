@@ -1250,25 +1250,140 @@ class fisherForecast(object):
          return
       self.free_params=self.get_listparams(list(self.free_params))
       zs = self.experiment.zcenters
-      for z in zs:
-         for free_param in self.free_params:
+      folder = '/derivatives_recon/' if self.recon else '/derivatives/'
+      klin = np.array([self.k[i*self.Nmu] for i in range(self.Nk)])
+
+      # Standard CLASS params: factor cosmo.compute() out of the z and pair
+      # loops, and share LPT tables across tracer pairs for a
+      # fixed (z, stencil step).
+      # Recon forecasts are excluded because compute_recon_power_spectrum reads
+      # from self.cosmo at call time, so cosmo must be at the stencil value
+      # when the spectrum is evaluated.
+      _standard_cosmo = [p for p in self.free_params
+                         if (p in self.params or p == 'log(A_s)') and not self.recon]
+      _other = [p for p in self.free_params if p not in _standard_cosmo]
+
+      # Pre-compute fiducial LPT tables per z for the AP correction term.
+      # These are shared across all standard cosmo params (P_fid is always at
+      # fiducial cosmology).
+      fid_lpt_tables = {}
+      if self.AP and _standard_cosmo:
+         h_fid = self.cosmo.h()
+         for z in zs:
+            plin_fid_z = np.array([self.cosmo.pk_cb_lin(k*h_fid, z)*h_fid**3. for k in klin])
+            f_fid_z = self.cosmo_fid.scale_independent_growth_factor_f(z)
+            fid_lpt_tables[z] = compute_lpt_tables(klin, plin_fid_z, f_fid_z)
+
+      default_step = {'tau_reio': 0.3, 'm_ncdm': 0.05, 'A_lin': 0.002, 'A_log': 0.002}
+
+      for free_param in _standard_cosmo:
+         flag = (free_param == 'log(A_s)')
+         class_param = 'A_s' if flag else free_param
+
+         relative_step = default_step.get(class_param, 0.01)
+         absolute_step_val = default_step.get(class_param, 0.01)
+         default_value = self.params[class_param]
+
+         if class_param == 'm_ncdm' and self.params['N_ncdm'] > 1:
+            dv_float = np.array(list(map(float, default_value.split(','))))
+            Mnu = sum(dv_float)
+            sv = relative_step * Mnu / self.params['N_ncdm']
+            stencil_vals = {
+               'up':       ','.join(map(str, dv_float + sv)),
+               'upup':     ','.join(map(str, dv_float + 2.*sv)),
+               'down':     ','.join(map(str, dv_float - sv)),
+               'downdown': ','.join(map(str, dv_float - 2.*sv)),
+            }
+            step = Mnu * relative_step
+         else:
+            up       = default_value*(1.+relative_step)    if default_value != 0. else  absolute_step_val
+            upup     = default_value*(1.+2.*relative_step)  if default_value != 0. else  2.*absolute_step_val
+            down     = default_value*(1.-relative_step)    if default_value != 0. else -absolute_step_val
+            downdown = default_value*(1.-2.*relative_step)  if default_value != 0. else -2.*absolute_step_val
+            step     = default_value*relative_step          if default_value != 0. else  absolute_step_val
+            stencil_vals = {'up': up, 'upup': upup, 'down': down, 'downdown': downdown}
+
+         stencil_keys = ['up', 'upup', 'down', 'downdown'] if five_point else ['up', 'down']
+
+         # Run CLASS once per stencil point; store plin, AP scalars, and f for all z.  Total CLASS calls: 4 (or 2).
+         stencil_data = {key: {} for key in stencil_keys}
+         for key in stencil_keys:
+            self.cosmo.set({class_param: stencil_vals[key]})
+            self.cosmo.compute()
+            h = self.cosmo.h()
+            for z in zs:
+               plin = np.array([self.cosmo.pk_cb_lin(k*h, z)*h**3. for k in klin])
+               aperp = self.cosmo.angular_distance(z)*h / self.Da_fid(z)
+               apar  = self.Hz_fid(z) / (self.cosmo.Hubble(z)*299792.458/h)
+               f_z   = self.cosmo.scale_independent_growth_factor_f(z)
+               stencil_data[key][z] = (plin, aperp, apar, f_z)
+         self.cosmo.set({class_param: default_value})
+         self.cosmo.compute()
+
+         for z in zs:
+            # LPT tables built once per (z, stencil point) — shared across
+            # all tracer pairs.
+            lpt_tbls = {key: compute_lpt_tables(klin, stencil_data[key][z][0],
+                                                stencil_data[key][z][3])
+                        for key in stencil_keys}
+
             for j in range(npairs):
-                if free_param == 'fEDE': filename = 'fEDE_'+str(int(1000.*self.log10z_c))+'_'+str(round(100*z))+'.txt'
-                elif free_param == 'A_lin': filename = 'A_lin_'+str(int(100.*self.omega_lin))+'_'+str(round(100*z))+'.txt'
-                elif free_param == 'A_log': filename = 'A_log_'+str(int(100.*self.omega_log))+'_'+str(round(100*z))+'.txt'
-                else: filename = free_param+'_'+str(round(100*z))+'.txt'
-                folder = '/derivatives/'
-                if self.recon: folder = '/derivatives_recon/'
-                s1,s2=self.index2sample(j)
-                name1=self.experiment.samples[s1]
-                name2=self.experiment.samples[s2]
-                filename='P'+name1+name2+'_'+filename
-                fname = self.basedir+'output/'+self.name+folder+filename
-                if not exists(fname) or overwrite:
-                   dPdp = self.compute_dPdp(param=free_param,X=s1,Y=s2, z=z, five_point=five_point)
-                   np.savetxt(fname,dPdp)
-                else:
-                   continue
+               s1, s2 = self.index2sample(j)
+               if free_param == 'fEDE': base = 'fEDE_'+str(int(1000.*self.log10z_c))+'_'+str(round(100*z))+'.txt'
+               elif free_param == 'A_lin': base = 'A_lin_'+str(int(100.*self.omega_lin))+'_'+str(round(100*z))+'.txt'
+               elif free_param == 'A_log': base = 'A_log_'+str(int(100.*self.omega_log))+'_'+str(round(100*z))+'.txt'
+               else: base = free_param+'_'+str(round(100*z))+'.txt'
+               fname = self.basedir+'output/'+self.name+folder+'P'+self.experiment.samples[s1]+self.experiment.samples[s2]+'_'+base
+               if exists(fname) and not overwrite:
+                  continue
+
+               P = {key: compute_tracer_power_spectrum(self, s1, s2, z,
+                          f=stencil_data[key][z][3], lpt_tables=lpt_tbls[key])
+                    for key in stencil_keys}
+
+               if five_point:
+                  result = (-P['upup'] + 8.*P['up'] - 8.*P['down'] + P['downdown']) / (12.*step)
+                  daperpdp = (-stencil_data['upup'][z][1] + 8.*stencil_data['up'][z][1]
+                              - 8.*stencil_data['down'][z][1] + stencil_data['downdown'][z][1]) / (12.*step)
+                  dapardp  = (-stencil_data['upup'][z][2] + 8.*stencil_data['up'][z][2]
+                              - 8.*stencil_data['down'][z][2] + stencil_data['downdown'][z][2]) / (12.*step)
+               else:
+                  result = (P['up'] - P['down']) / (2.*step)
+                  daperpdp = (stencil_data['up'][z][1] - stencil_data['down'][z][1]) / (2.*step)
+                  dapardp  = (stencil_data['up'][z][2] - stencil_data['down'][z][2]) / (2.*step)
+
+               if self.AP:
+                  P_fid_jp = compute_tracer_power_spectrum(self, s1, s2, z,
+                                lpt_tables=fid_lpt_tables[z])
+                  K, MU = self.k, self.mu
+                  result -= (dapardp + 2.*daperpdp)*P_fid_jp
+                  result -= MU*(1.-MU**2)*(dapardp-daperpdp)*self.dPdmu(P_fid_jp)
+                  result -= K*(dapardp*MU**2 + daperpdp*(1.-MU**2))*self.dPdk(P_fid_jp)
+
+               if flag: result *= self.params['A_s']
+               np.savetxt(fname, result)
+
+      # -----------------------------------------------------------------------
+      # All other params (bias, f_NL, special params, and all recon params)
+      # use compute_dPdp unchanged.
+      # -----------------------------------------------------------------------
+      for z in zs:
+         for free_param in _other:
+            for j in range(npairs):
+               if free_param == 'fEDE': filename = 'fEDE_'+str(int(1000.*self.log10z_c))+'_'+str(round(100*z))+'.txt'
+               elif free_param == 'A_lin': filename = 'A_lin_'+str(int(100.*self.omega_lin))+'_'+str(round(100*z))+'.txt'
+               elif free_param == 'A_log': filename = 'A_log_'+str(int(100.*self.omega_log))+'_'+str(round(100*z))+'.txt'
+               else: filename = free_param+'_'+str(round(100*z))+'.txt'
+               s1,s2=self.index2sample(j)
+               name1=self.experiment.samples[s1]
+               name2=self.experiment.samples[s2]
+               filename='P'+name1+name2+'_'+filename
+               fname = self.basedir+'output/'+self.name+folder+filename
+               if not exists(fname) or overwrite:
+                  dPdp = self.compute_dPdp(param=free_param,X=s1,Y=s2, z=z, five_point=five_point)
+                  np.savetxt(fname,dPdp)
+               else:
+                  continue
        
     
    def compute_Cl_derivatives(self, five_point=True, overwrite=False):
