@@ -1121,15 +1121,16 @@ class fisherForecast(object):
          downdown = default_value*(1-2*relative_step)
          if default_value == 0: downdown = -2*absolute_step
          step = up - default_value
+         _cleft_tables = {}
          kwargs[param] = up
-         P_dummy_hi = compute_lensing_Cell(**kwargs)
+         P_dummy_hi = compute_lensing_Cell(**kwargs, cleft_tables=_cleft_tables)
          kwargs[param] = down
-         P_dummy_low = compute_lensing_Cell(**kwargs)
+         P_dummy_low = compute_lensing_Cell(**kwargs, cleft_tables=_cleft_tables)
          if five_point:
             kwargs[param] = upup
-            P_dummy_higher = compute_lensing_Cell(**kwargs)
+            P_dummy_higher = compute_lensing_Cell(**kwargs, cleft_tables=_cleft_tables)
             kwargs[param] = downdown
-            P_dummy_lower = compute_lensing_Cell(**kwargs)
+            P_dummy_lower = compute_lensing_Cell(**kwargs, cleft_tables=_cleft_tables)
          kwargs[param] = default_value
          if five_point: return (-P_dummy_higher + 8.*P_dummy_hi - 8.*P_dummy_low + P_dummy_lower) / (12. *  step) 
          return (P_dummy_hi-P_dummy_low) / (2. * step)
@@ -1388,54 +1389,172 @@ class fisherForecast(object):
     
    def compute_Cl_derivatives(self, five_point=True, overwrite=False):
       '''
-      Calculates the derivatives of Ckk, Ckg, and Cgg with respect to 
-      each of the free_params. 
+      Calculates the derivatives of Ckk, Ckg, and Cgg with respect to
+      each of the free_params.
       '''
-      nsamples=len(self.experiment.b)
-      npairs=int(nsamples*(nsamples+1)/2)
+      nsamples = len(self.experiment.b)
+      npairs = int(nsamples*(nsamples+1)/2)
       zs = self.experiment.zedges
-      self.free_params=self.get_listparams(list(self.free_params))
-      for free_param in self.free_params:
-         #
-         if free_param != 'gamma':
-            filename = 'Ckk_'+free_param+'.txt'
-            fname = self.basedir+'output/'+self.name+'/derivatives_Cl/'+filename
-            if not exists(fname) or overwrite: 
-               dCdp = self.compute_dCdp(free_param, 'k', 'k', five_point=five_point)
-               np.savetxt(fname,dCdp)
-            #else:
-            #   continue
+      self.free_params = self.get_listparams(list(self.free_params))
+      deriv_dir = self.basedir+'output/'+self.name+'/derivatives_Cl/'
+
+      _standard_cosmo = [p for p in self.free_params
+                         if p in self.params or p == 'log(A_s)']
+      _other = [p for p in self.free_params if p not in _standard_cosmo]
+
+      default_step = {'tau_reio': 0.3, 'm_ncdm': 0.05, 'A_lin': 0.002, 'A_log': 0.002}
+
+      def stencil_formula(stencil_cell, key, step, five_point):
+         if five_point:
+            return (-stencil_cell['upup'][key] + 8.*stencil_cell['up'][key]
+                    - 8.*stencil_cell['down'][key] + stencil_cell['downdown'][key]) / (12.*step)
+         return (stencil_cell['up'][key] - stencil_cell['down'][key]) / (2.*step)
+
+      # -----------------------------------------------------------------------
+      # Standard CLASS params: share CLASS.compute() across all Cell types
+      # -----------------------------------------------------------------------
+      for free_param in _standard_cosmo:
+         flag = (free_param == 'log(A_s)')
+         class_param = 'A_s' if flag else free_param
+
+         relative_step = default_step.get(class_param, 0.01)
+         absolute_step_val = default_step.get(class_param, 0.01)
+         default_value = self.params_fid[class_param]
+
+         if class_param == 'm_ncdm' and self.params['N_ncdm'] > 1:
+            dv_float = np.array(list(map(float, default_value.split(','))))
+            Mnu = sum(dv_float)
+            sv = relative_step * Mnu / self.params['N_ncdm']
+            stencil_vals = {
+               'up':       ','.join(map(str, dv_float + sv)),
+               'upup':     ','.join(map(str, dv_float + 2.*sv)),
+               'down':     ','.join(map(str, dv_float - sv)),
+               'downdown': ','.join(map(str, dv_float - 2.*sv)),
+            }
+            step = Mnu * relative_step
          else:
-            for i,z in enumerate(zs[:-1]):
-               filename = 'Ckk_'+free_param+'_'+str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))+'.txt'
-               fname = self.basedir+'output/'+self.name+'/derivatives_Cl/'+filename
-               if not exists(fname) or overwrite: 
-                  dCdp = self.compute_dCdp(free_param, 'k', 'k',zmin=zs[i],zmax=zs[i+1], five_point=five_point)
-                  np.savetxt(fname,dCdp)
-               else:
-                  continue
-         #
-         for i,z in enumerate(zs[:-1]):
+            up       = default_value*(1.+relative_step)   if default_value != 0. else  absolute_step_val
+            upup     = default_value*(1.+2.*relative_step) if default_value != 0. else  2.*absolute_step_val
+            down     = default_value*(1.-relative_step)   if default_value != 0. else -absolute_step_val
+            downdown = default_value*(1.-2.*relative_step) if default_value != 0. else -2.*absolute_step_val
+            step     = default_value*relative_step         if default_value != 0. else  absolute_step_val
+            stencil_vals = {'up': up, 'upup': upup, 'down': down, 'downdown': downdown}
+
+         stencil_keys = ['up', 'upup', 'down', 'downdown'] if five_point else ['up', 'down']
+
+         # Collect all output filenames; skip CLASS stencil if all exist
+         ckk_fname = deriv_dir+'Ckk_'+free_param+'.txt'
+         all_fnames = [ckk_fname]
+         for i in range(len(zs)-1):
+            zstr = str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))
             for j in range(npairs):
-                s1,s2=self.index2sample(j)
-                name1=self.experiment.samples[s1]
-                name2=self.experiment.samples[s2]
-                filename = 'C'+name1+name2+'_'+free_param+'_'+str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))+'.txt'
-                fname = self.basedir+'output/'+self.name+'/derivatives_Cl/'+filename
-                if not exists(fname) or overwrite: 
-                   dCdp = self.compute_dCdp(free_param, s1, s2, zmin=zs[i], zmax=zs[i+1], five_point=five_point)
-                   np.savetxt(fname,dCdp) 
-                #else:
-                #   continue
-                if j<nsamples:
-                    name1=self.experiment.samples[j]
-                    filename = 'Ck'+name1+'_'+free_param+'_'+str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))+'.txt'
-                    fname = self.basedir+'output/'+self.name+'/derivatives_Cl/'+filename
-                    if not exists(fname) or overwrite: 
-                       dCdp = self.compute_dCdp(free_param, 'k', j, zmin=zs[i], zmax=zs[i+1], five_point=five_point)
-                       np.savetxt(fname,dCdp)
-                    #else:
-                    #   continue
+               s1, s2 = self.index2sample(j)
+               name1 = self.experiment.samples[s1]
+               name2 = self.experiment.samples[s2]
+               all_fnames.append(deriv_dir+'C'+name1+name2+'_'+free_param+'_'+zstr+'.txt')
+            for j in range(nsamples):
+               name1 = self.experiment.samples[j]
+               all_fnames.append(deriv_dir+'Ck'+name1+'_'+free_param+'_'+zstr+'.txt')
+         if not overwrite and all(exists(f) for f in all_fnames):
+            continue
+
+         # Run CLASS stencil: one compute() per stencil point, evaluate all Cell types
+         stencil_cell = {key: {} for key in stencil_keys}
+         for key in stencil_keys:
+            self.cosmo.set({class_param: stencil_vals[key]})
+            self.cosmo.compute()
+            stencil_cell[key]['kk'] = compute_lensing_Cell(self, 'k', 'k')
+            for i in range(len(zs)-1):
+               zmin, zmax_bin = zs[i], zs[i+1]
+               zmid = (zmin+zmax_bin)/2
+               for j in range(npairs):
+                  s1, s2 = self.index2sample(j)
+                  ba  = compute_b(self, zmid, s1)
+                  bb  = compute_b(self, zmid, s2)
+                  b2a = self.experiment.b2[s1](zmid)
+                  b2b = self.experiment.b2[s2](zmid)
+                  alpha0a = self.experiment.alpha0[s1](zmid)
+                  alpha0b = self.experiment.alpha0[s2](zmid)
+                  noise_val = (self.experiment.fover[self.sample2index(s1,s2)] /
+                               np.sqrt(compute_n(self,zmid,s1)*compute_n(self,zmid,s2))
+                               ) if s1==s2 else 0
+                  stencil_cell[key][(i, j, 'gg')] = compute_lensing_Cell(
+                     self, s1, s2, zmin=zmin, zmax=zmax_bin, zmid=zmid,
+                     ba=ba, bb=bb, b2a=b2a, b2b=b2b,
+                     bsa=-2*(ba-1)/7, bsb=-2*(bb-1)/7,
+                     alpha0a=alpha0a, alpha0b=alpha0b, N=noise_val)
+               for j in range(nsamples):
+                  bb  = compute_b(self, zmid, j)
+                  b2b = self.experiment.b2[j](zmid)
+                  alpha0a = self.experiment.alphak(zmid)
+                  alpha0b = self.experiment.alpha0[j](zmid)
+                  stencil_cell[key][(i, j, 'kg')] = compute_lensing_Cell(
+                     self, 'k', j, zmin=zmin, zmax=zmax_bin, zmid=zmid,
+                     ba=1, bb=bb, b2a=0, b2b=b2b,
+                     bsa=0, bsb=-2*(bb-1)/7,
+                     alpha0a=alpha0a, alpha0b=alpha0b, N=0)
+         self.cosmo.set({class_param: default_value})
+         self.cosmo.compute()
+
+         # Save Ckk derivative
+         if not exists(ckk_fname) or overwrite:
+            result = stencil_formula(stencil_cell, 'kk', step, five_point)
+            if flag: result *= self.params['A_s']
+            np.savetxt(ckk_fname, result)
+
+         # Save Cgg and Ckg derivatives
+         for i in range(len(zs)-1):
+            zstr = str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))
+            for j in range(npairs):
+               s1, s2 = self.index2sample(j)
+               name1 = self.experiment.samples[s1]
+               name2 = self.experiment.samples[s2]
+               fname = deriv_dir+'C'+name1+name2+'_'+free_param+'_'+zstr+'.txt'
+               if not exists(fname) or overwrite:
+                  result = stencil_formula(stencil_cell, (i, j, 'gg'), step, five_point)
+                  if flag: result *= self.params['A_s']
+                  np.savetxt(fname, result)
+            for j in range(nsamples):
+               name1 = self.experiment.samples[j]
+               fname = deriv_dir+'Ck'+name1+'_'+free_param+'_'+zstr+'.txt'
+               if not exists(fname) or overwrite:
+                  result = stencil_formula(stencil_cell, (i, j, 'kg'), step, five_point)
+                  if flag: result *= self.params['A_s']
+                  np.savetxt(fname, result)
+
+      # -----------------------------------------------------------------------
+      # All other params (bias, f_NL, gamma, ...): use compute_dCdp unchanged
+      # -----------------------------------------------------------------------
+      for free_param in _other:
+         if free_param != 'gamma':
+            fname = deriv_dir+'Ckk_'+free_param+'.txt'
+            if not exists(fname) or overwrite:
+               dCdp = self.compute_dCdp(free_param, 'k', 'k', five_point=five_point)
+               np.savetxt(fname, dCdp)
+         else:
+            for i, z in enumerate(zs[:-1]):
+               filename = 'Ckk_'+free_param+'_'+str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))+'.txt'
+               fname = deriv_dir+filename
+               if not exists(fname) or overwrite:
+                  dCdp = self.compute_dCdp(free_param, 'k', 'k', zmin=zs[i], zmax=zs[i+1], five_point=five_point)
+                  np.savetxt(fname, dCdp)
+         for i, z in enumerate(zs[:-1]):
+            for j in range(npairs):
+               s1, s2 = self.index2sample(j)
+               name1 = self.experiment.samples[s1]
+               name2 = self.experiment.samples[s2]
+               filename = 'C'+name1+name2+'_'+free_param+'_'+str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))+'.txt'
+               fname = deriv_dir+filename
+               if not exists(fname) or overwrite:
+                  dCdp = self.compute_dCdp(free_param, s1, s2, zmin=zs[i], zmax=zs[i+1], five_point=five_point)
+                  np.savetxt(fname, dCdp)
+               if j < nsamples:
+                  name1 = self.experiment.samples[j]
+                  filename = 'Ck'+name1+'_'+free_param+'_'+str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))+'.txt'
+                  fname = deriv_dir+filename
+                  if not exists(fname) or overwrite:
+                     dCdp = self.compute_dCdp(free_param, 'k', j, zmin=zs[i], zmax=zs[i+1], five_point=five_point)
+                     np.savetxt(fname, dCdp)
             
            
    def check_derivatives(self):

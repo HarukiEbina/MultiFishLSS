@@ -347,9 +347,16 @@ def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1,
    elif ell_mult == 4: pkmu = 0.125*(35*MU**4-30*MU**2+3)*p4
    return pkmu
 
-def compute_real_space_cross_power(fishcast, X, Y, z, gamma=1., b=-1., 
+def compute_cleft_tables(klin, plin, fishcast):
+   cleft = CLEFT(klin, plin, cutoff=2.)
+   cleft.make_ptable(kmin=min(klin), kmax=max(klin), nk=fishcast.Nk)
+   return cleft
+
+
+def compute_real_space_cross_power(fishcast, X, Y, z, gamma=1., b=-1.,
                                    b2=-1,bs=-1,alpha0=-1,alphax=0,N=None,
-                                   ba=-1,bb=-1,b2a=-1,b2b=-1,bsa=-1,bsb=-1,bpoly=None,alpha0a=-1,alpha0b=-1,useHF=True):
+                                   ba=-1,bb=-1,b2a=-1,b2b=-1,bsa=-1,bsb=-1,bpoly=None,alpha0a=-1,alpha0b=-1,useHF=True,
+                                   cleft_table=None):
    '''
    Wrapper function for CLEFT. Returns P_XY where X,Y = k or g
    as a function of k.
@@ -369,36 +376,37 @@ def compute_real_space_cross_power(fishcast, X, Y, z, gamma=1., b=-1.,
    K = fishcast.k
     
    klin = np.array([K[i*fishcast.Nmu] for i in range(fishcast.Nk)])
-   plin = np.array([fishcast.cosmo.pk_cb_lin(k*h,z)*h**3. for k in klin])
-    
-   ######################################################################################################## 
+   ########################################################################################################
    if fishcast.linear:
       print('forecast.linear deprecated')
-    
-   if X == Y and X == 'k': 
+
+   if X == Y and X == 'k':
       plin = np.array([fishcast.cosmo.pk_lin(k*h,z)*h**3. for k in klin])
       cleft = CLEFT(klin,plin,cutoff=2.)
       cleft.make_ptable(kmin=min(klin),kmax=max(klin),nk=fishcast.Nk)
-      kk,pmm = cleft.combine_bias_terms_pk(0,0,0,0,0,0) 
+      kk,pmm = cleft.combine_bias_terms_pk(0,0,0,0,0,0)
       if z>10: pmm=np.array([fishcast.cosmo.pk(k*h,z)*h**3. for k in klin])
       return interp1d(kk, pmm, kind='linear', bounds_error=False, fill_value=0.)
-      
-   cleft = CLEFT(klin,plin,cutoff=2.)
-   cleft.make_ptable(kmin=min(klin),kmax=max(klin),nk=fishcast.Nk)
-   
+
+   if cleft_table is None:
+      plin = np.array([fishcast.cosmo.pk_cb_lin(k*h,z)*h**3. for k in klin])
+      cleft_table = CLEFT(klin,plin,cutoff=2.)
+      cleft_table.make_ptable(kmin=min(klin),kmax=max(klin),nk=fishcast.Nk)
+
    if bpoly is not None: #ga gb ### and k g
-      kk = cleft.pktable[:,0]
-      pktemp = np.copy(cleft.pktable)[:,1:-1]
-      pgg = np.sum(pktemp*bpoly[:12],axis=1)+bpoly[12]*kk**2* cleft.pktable[:,-1] +bpoly[16]
-      return interp1d(kk, pgg, kind='linear', bounds_error=False, fill_value=0.) 
-   else: 
+      kk = cleft_table.pktable[:,0]
+      pktemp = np.copy(cleft_table.pktable)[:,1:-1]
+      pgg = np.sum(pktemp*bpoly[:12],axis=1)+bpoly[12]*kk**2* cleft_table.pktable[:,-1] +bpoly[16]
+      return interp1d(kk, pgg, kind='linear', bounds_error=False, fill_value=0.)
+   else:
       print('bias polynomial undefined')
-      return None   
+      return None
    
-def compute_lensing_Cell(fishcast, X, Y, zmin=None, zmax=None,zmid=None,gamma=1., 
+def compute_lensing_Cell(fishcast, X, Y, zmin=None, zmax=None,zmid=None,gamma=1.,
                          b=-1,b2=-1,bs=-1, alpha0=-1,alphax=0.,N=-1,
                          noise=False,Nzsteps=100,Nzeff='auto',maxDz=0.2,
-                         ba=-1,bb=-1,b2a=-1,b2b=-1,bsa=-1,bsb=-1,alpha0a=-1,alpha0b=-1,useHF=True):
+                         ba=-1,bb=-1,b2a=-1,b2b=-1,bsa=-1,bsb=-1,alpha0a=-1,alpha0b=-1,useHF=True,
+                         cleft_tables=None):
    '''
    Calculates C^XY_l using the Limber approximation where X,Y = 'k' or 'g'. 
    Returns an array of length len(fishcast.ell). If X=Y=k, use CLASS with 
@@ -531,11 +539,19 @@ def compute_lensing_Cell(fishcast, X, Y, zmin=None, zmax=None,zmid=None,gamma=1.
 #        if X=='k' or Y=='k': return forecast.experiment.alphak(z) * alpha0b/alpha0b_fid
        return fishcast.experiment.fover[fishcast.sample2index(X,Y)]/np.sqrt(fishcast.experiment.n[X](z)*fishcast.experiment.n[Y](z))
 
-   # calculate P_XY 
-   if not noise: 
-        P = [compute_real_space_cross_power(
-             fishcast, X, Y, zz, gamma=gamma, ba=baz(zz), bb=bbz(zz), b2a=b2az(zz), b2b=b2bz(zz),
-             bsa=bsaz(zz),bsb=bsbz(zz),alpha0a=alpha0az(zz),alpha0b=alpha0bz(zz),N=Nz(zz)) for zz in zeff]
+   # calculate P_XY
+   if not noise:
+        P = []
+        for zz in zeff:
+           if cleft_tables is not None and zz not in cleft_tables:
+              _h = fishcast.cosmo.h()
+              _klin = np.array([fishcast.k[i*fishcast.Nmu] for i in range(fishcast.Nk)])
+              _plin = np.array([fishcast.cosmo.pk_cb_lin(k*_h, zz)*_h**3. for k in _klin])
+              cleft_tables[zz] = compute_cleft_tables(_klin, _plin, fishcast)
+           P.append(compute_real_space_cross_power(
+                fishcast, X, Y, zz, gamma=gamma, ba=baz(zz), bb=bbz(zz), b2a=b2az(zz), b2b=b2bz(zz),
+                bsa=bsaz(zz),bsb=bsbz(zz),alpha0a=alpha0az(zz),alpha0b=alpha0bz(zz),N=Nz(zz),
+                cleft_table=cleft_tables[zz] if cleft_tables is not None else None))
    if noise: 
         #this ignores fover - assumes fover==0 for cross
         if X!='k' and X==Y:
