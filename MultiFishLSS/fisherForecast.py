@@ -1264,16 +1264,10 @@ class fisherForecast(object):
                          if (p in self.params or p == 'log(A_s)') and not self.recon]
       _other = [p for p in self.free_params if p not in _standard_cosmo]
 
-      # Pre-compute fiducial LPT tables per z for the AP correction term.
-      # These are shared across all standard cosmo params (P_fid is always at
-      # fiducial cosmology).
+      # Fiducial LPT tables for the AP correction term, shared across all
+      # standard cosmo params.  Built lazily on the first param that actually
+      # runs its stencil (i.e. skipped entirely when all files already exist).
       fid_lpt_tables = {}
-      if self.AP and _standard_cosmo:
-         h_fid = self.cosmo.h()
-         for z in zs:
-            plin_fid_z = np.array([self.cosmo.pk_cb_lin(k*h_fid, z)*h_fid**3. for k in klin])
-            f_fid_z = self.cosmo_fid.scale_independent_growth_factor_f(z)
-            fid_lpt_tables[z] = compute_lpt_tables(klin, plin_fid_z, f_fid_z)
 
       default_step = {'tau_reio': 0.3, 'm_ncdm': 0.05, 'A_lin': 0.002, 'A_log': 0.002}
 
@@ -1306,6 +1300,19 @@ class fisherForecast(object):
 
          stencil_keys = ['up', 'upup', 'down', 'downdown'] if five_point else ['up', 'down']
 
+         # Short-circuit: skip CLASS stencil entirely if all output files exist.
+         _all_fnames = []
+         for z in zs:
+            if free_param == 'fEDE': _base = 'fEDE_'+str(int(1000.*self.log10z_c))+'_'+str(round(100*z))+'.txt'
+            elif free_param == 'A_lin': _base = 'A_lin_'+str(int(100.*self.omega_lin))+'_'+str(round(100*z))+'.txt'
+            elif free_param == 'A_log': _base = 'A_log_'+str(int(100.*self.omega_log))+'_'+str(round(100*z))+'.txt'
+            else: _base = free_param+'_'+str(round(100*z))+'.txt'
+            for j in range(npairs):
+               s1, s2 = self.index2sample(j)
+               _all_fnames.append(self.basedir+'output/'+self.name+folder+'P'+self.experiment.samples[s1]+self.experiment.samples[s2]+'_'+_base)
+         if not overwrite and all(exists(f) for f in _all_fnames):
+            continue
+
          # Run CLASS once per stencil point; store plin, AP scalars, and f for all z.  Total CLASS calls: 4 (or 2).
          stencil_data = {key: {} for key in stencil_keys}
          for key in stencil_keys:
@@ -1320,6 +1327,15 @@ class fisherForecast(object):
                stencil_data[key][z] = (plin, aperp, apar, f_z)
          self.cosmo.set({class_param: default_value})
          self.cosmo.compute()
+
+         # Build fid_lpt_tables lazily on the first param that runs its stencil.
+         # (self.cosmo has just been restored to fiducial above.)
+         if self.AP and not fid_lpt_tables:
+            h_fid = self.cosmo.h()
+            for z in zs:
+               plin_fid_z = np.array([self.cosmo.pk_cb_lin(k*h_fid, z)*h_fid**3. for k in klin])
+               f_fid_z = self.cosmo_fid.scale_independent_growth_factor_f(z)
+               fid_lpt_tables[z] = compute_lpt_tables(klin, plin_fid_z, f_fid_z)
 
          for z in zs:
             # LPT tables built once per (z, stencil point) — shared across
