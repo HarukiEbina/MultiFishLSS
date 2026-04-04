@@ -258,6 +258,155 @@ def _pell_cosmo_param_worker(args):
       cosmo.empty()
 
 
+def _cell_cosmo_param_worker(args):
+   """
+   Spawn-safe worker for one _standard_cosmo param in compute_Cl_derivatives.
+   Receives only picklable data; reconstructs Class() and interp1d locally.
+   Parallelism is at the param level: one worker handles all z-bins and tracer
+   pairs for its assigned param.
+   """
+   import types
+   free_param    = args['free_param']
+   class_param   = args['class_param']
+   default_value = args['default_value']
+   stencil_vals  = args['stencil_vals']
+   stencil_keys  = args['stencil_keys']
+   step          = args['step']
+   flag          = args['flag']
+   five_point    = args['five_point']
+   overwrite     = args['overwrite']
+   params        = args['params']
+   ell           = args['ell']
+   k             = args['k']
+   Nk            = args['Nk']
+   Nmu           = args['Nmu']
+   z_tab         = args['z_tab']
+   b_tab         = args['b_tab']
+   b2_tab        = args['b2_tab']
+   alpha0_tab    = args['alpha0_tab']
+   alphak_tab    = args['alphak_tab']
+   n_tab         = args['n_tab']
+   fover_lookup  = args['fover_lookup']
+   samples       = args['samples']
+   nsamples      = args['nsamples']
+   npairs        = args['npairs']
+   zs            = args['zs']
+   deriv_dir     = args['deriv_dir']
+   A_s           = args['A_s']
+   linear        = args['linear']
+
+   # Short-circuit: return early if all output files already exist.
+   ckk_fname = deriv_dir + 'Ckk_' + free_param + '.txt'
+   all_fnames = [ckk_fname]
+   for i in range(len(zs) - 1):
+      zstr = str(round(100*zs[i])) + '_' + str(round(100*zs[i+1]))
+      for j in range(npairs):
+         s1, s2 = _index2sample(j, nsamples)
+         all_fnames.append(deriv_dir + 'C' + samples[s1] + samples[s2] + '_' + free_param + '_' + zstr + '.txt')
+      for j in range(nsamples):
+         all_fnames.append(deriv_dir + 'Ck' + samples[j] + '_' + free_param + '_' + zstr + '.txt')
+   if not overwrite and all(exists(f) for f in all_fnames):
+      return
+
+   # Reconstruct interp1d bias/n functions from tabulated arrays.
+   b_interps      = [interp1d(z_tab, b_tab[s],      kind='linear', bounds_error=False, fill_value='extrapolate') for s in range(nsamples)]
+   b2_interps     = [interp1d(z_tab, b2_tab[s],     kind='linear', bounds_error=False, fill_value='extrapolate') for s in range(nsamples)]
+   alpha0_interps = [interp1d(z_tab, alpha0_tab[s], kind='linear', bounds_error=False, fill_value='extrapolate') for s in range(nsamples)]
+   alphak_interp  =  interp1d(z_tab, alphak_tab,    kind='linear', bounds_error=False, fill_value='extrapolate')
+   n_interps      = [interp1d(z_tab, n_tab[s],      kind='linear', bounds_error=False, fill_value='extrapolate') for s in range(nsamples)]
+
+   # Build stub experiment (SimpleNamespace, no lambdas — all picklable sources).
+   exp_stub = types.SimpleNamespace(
+      b=b_interps, b2=b2_interps, alpha0=alpha0_interps,
+      alphak=alphak_interp, n=n_interps,
+      fover=fover_lookup,
+      samples=samples,
+      custom_b=False,
+   )
+
+   # Fresh CLASS instance — isolated from parent and other workers.
+   cosmo = Class()
+   cosmo.set(params)
+   cosmo.compute()
+
+   # Build stub fishcast.
+   stub = types.SimpleNamespace(
+      cosmo=cosmo, ell=ell, k=k, Nk=Nk, Nmu=Nmu,
+      params=params, experiment=exp_stub, linear=linear,
+   )
+   stub.sample2index = lambda X, Y: (X, Y)
+
+   try:
+      # CLASS stencil: one compute() per stencil point, evaluate all Cell types.
+      stencil_cell = {key: {} for key in stencil_keys}
+      for key in stencil_keys:
+         cosmo.set({class_param: stencil_vals[key]})
+         cosmo.compute()
+         stencil_cell[key]['kk'] = compute_lensing_Cell(stub, 'k', 'k')
+         for i in range(len(zs) - 1):
+            zmin, zmax_bin = zs[i], zs[i+1]
+            zmid = (zmin + zmax_bin) / 2.
+            for j in range(npairs):
+               s1, s2 = _index2sample(j, nsamples)
+               ba  = float(b_interps[s1](zmid))
+               bb  = float(b_interps[s2](zmid))
+               b2a = float(b2_interps[s1](zmid))
+               b2b = float(b2_interps[s2](zmid))
+               alpha0a = float(alpha0_interps[s1](zmid))
+               alpha0b = float(alpha0_interps[s2](zmid))
+               noise_val = (float(fover_lookup[s1, s2]) /
+                            np.sqrt(float(n_interps[s1](zmid)) * float(n_interps[s2](zmid)))
+                            ) if s1 == s2 else 0
+               stencil_cell[key][(i, j, 'gg')] = compute_lensing_Cell(
+                  stub, s1, s2, zmin=zmin, zmax=zmax_bin, zmid=zmid,
+                  ba=ba, bb=bb, b2a=b2a, b2b=b2b,
+                  bsa=-2*(ba-1)/7, bsb=-2*(bb-1)/7,
+                  alpha0a=alpha0a, alpha0b=alpha0b, N=noise_val)
+            for j in range(nsamples):
+               bb      = float(b_interps[j](zmid))
+               b2b     = float(b2_interps[j](zmid))
+               alpha0a = float(alphak_interp(zmid))
+               alpha0b = float(alpha0_interps[j](zmid))
+               stencil_cell[key][(i, j, 'kg')] = compute_lensing_Cell(
+                  stub, 'k', j, zmin=zmin, zmax=zmax_bin, zmid=zmid,
+                  ba=1, bb=bb, b2a=0, b2b=b2b,
+                  bsa=0, bsb=-2*(bb-1)/7,
+                  alpha0a=alpha0a, alpha0b=alpha0b, N=0)
+      cosmo.set({class_param: default_value})
+      cosmo.compute()
+
+      def _sf(sc, key):
+         if five_point:
+            return (-sc['upup'][key] + 8.*sc['up'][key] - 8.*sc['down'][key] + sc['downdown'][key]) / (12.*step)
+         return (sc['up'][key] - sc['down'][key]) / (2.*step)
+
+      # Save Ckk derivative.
+      if not exists(ckk_fname) or overwrite:
+         result = _sf(stencil_cell, 'kk')
+         if flag: result *= A_s
+         np.savetxt(ckk_fname, result)
+
+      # Save Cgg and Ckg derivatives.
+      for i in range(len(zs) - 1):
+         zstr = str(round(100*zs[i])) + '_' + str(round(100*zs[i+1]))
+         for j in range(npairs):
+            s1, s2 = _index2sample(j, nsamples)
+            fname = deriv_dir + 'C' + samples[s1] + samples[s2] + '_' + free_param + '_' + zstr + '.txt'
+            if not exists(fname) or overwrite:
+               result = _sf(stencil_cell, (i, j, 'gg'))
+               if flag: result *= A_s
+               np.savetxt(fname, result)
+         for j in range(nsamples):
+            fname = deriv_dir + 'Ck' + samples[j] + '_' + free_param + '_' + zstr + '.txt'
+            if not exists(fname) or overwrite:
+               result = _sf(stencil_cell, (i, j, 'kg'))
+               if flag: result *= A_s
+               np.savetxt(fname, result)
+   finally:
+      cosmo.struct_cleanup()
+      cosmo.empty()
+
+
 # ---------------------------------------------------------------------------
 
 class fisherForecast(object):
@@ -1689,7 +1838,7 @@ class fisherForecast(object):
                   continue
        
     
-   def compute_Cl_derivatives(self, five_point=True, overwrite=False):
+   def compute_Cl_derivatives(self, five_point=True, overwrite=False, n_workers=1):
       '''
       Calculates the derivatives of Ckk, Ckg, and Cgg with respect to
       each of the free_params.
@@ -1715,114 +1864,147 @@ class fisherForecast(object):
       # -----------------------------------------------------------------------
       # Standard CLASS params: share CLASS.compute() across all Cell types
       # -----------------------------------------------------------------------
-      for free_param in _standard_cosmo:
-         flag = (free_param == 'log(A_s)')
-         class_param = 'A_s' if flag else free_param
+      if n_workers > 1 and _standard_cosmo:
+         max_z = float(max(zs)) + 1.0
+         _z_tab = np.linspace(0, max_z, 500)
+         _b_tab      = np.array([[compute_b(self, z, s) for z in _z_tab] for s in range(nsamples)])
+         _b2_tab     = np.array([[self.experiment.b2[s](z) for z in _z_tab] for s in range(nsamples)])
+         _alpha0_tab = np.array([[self.experiment.alpha0[s](z) for z in _z_tab] for s in range(nsamples)])
+         _alphak_tab = np.array([self.experiment.alphak(z) for z in _z_tab])
+         _n_tab      = np.array([[compute_n(self, z, s) for z in _z_tab] for s in range(nsamples)])
+         _fover_lookup = np.array([[self.experiment.fover[self.sample2index(s1, s2)]
+                                    for s2 in range(nsamples)]
+                                   for s1 in range(nsamples)])
+         shared = dict(
+            params=dict(self.params_fid),
+            ell=self.ell, k=self.k, Nk=self.Nk, Nmu=self.Nmu,
+            z_tab=_z_tab,
+            b_tab=_b_tab, b2_tab=_b2_tab, alpha0_tab=_alpha0_tab,
+            alphak_tab=_alphak_tab, n_tab=_n_tab,
+            fover_lookup=_fover_lookup,
+            samples=list(self.experiment.samples),
+            nsamples=nsamples, npairs=npairs,
+            zs=list(zs),
+            deriv_dir=deriv_dir,
+            A_s=self.params_fid.get('A_s'),
+            linear=self.linear,
+         )
+         param_args = [
+            {**shared, **_build_pell_param_args(p, dict(self.params_fid), default_step,
+                                                five_point, overwrite)}
+            for p in _standard_cosmo
+         ]
+         with _mp.get_context('spawn').Pool(processes=n_workers) as pool:
+            pool.map(_cell_cosmo_param_worker, param_args)
+      else:
+         for free_param in _standard_cosmo:
+            flag = (free_param == 'log(A_s)')
+            class_param = 'A_s' if flag else free_param
 
-         relative_step = default_step.get(class_param, 0.01)
-         absolute_step_val = default_step.get(class_param, 0.01)
-         default_value = self.params_fid[class_param]
+            relative_step = default_step.get(class_param, 0.01)
+            absolute_step_val = default_step.get(class_param, 0.01)
+            default_value = self.params_fid[class_param]
 
-         if class_param == 'm_ncdm' and self.params['N_ncdm'] > 1:
-            dv_float = np.array(list(map(float, default_value.split(','))))
-            Mnu = sum(dv_float)
-            sv = relative_step * Mnu / self.params['N_ncdm']
-            stencil_vals = {
-               'up':       ','.join(map(str, dv_float + sv)),
-               'upup':     ','.join(map(str, dv_float + 2.*sv)),
-               'down':     ','.join(map(str, dv_float - sv)),
-               'downdown': ','.join(map(str, dv_float - 2.*sv)),
-            }
-            step = Mnu * relative_step
-         else:
-            up       = default_value*(1.+relative_step)   if default_value != 0. else  absolute_step_val
-            upup     = default_value*(1.+2.*relative_step) if default_value != 0. else  2.*absolute_step_val
-            down     = default_value*(1.-relative_step)   if default_value != 0. else -absolute_step_val
-            downdown = default_value*(1.-2.*relative_step) if default_value != 0. else -2.*absolute_step_val
-            step     = default_value*relative_step         if default_value != 0. else  absolute_step_val
-            stencil_vals = {'up': up, 'upup': upup, 'down': down, 'downdown': downdown}
+            if class_param == 'm_ncdm' and self.params['N_ncdm'] > 1:
+               dv_float = np.array(list(map(float, default_value.split(','))))
+               Mnu = sum(dv_float)
+               sv = relative_step * Mnu / self.params['N_ncdm']
+               stencil_vals = {
+                  'up':       ','.join(map(str, dv_float + sv)),
+                  'upup':     ','.join(map(str, dv_float + 2.*sv)),
+                  'down':     ','.join(map(str, dv_float - sv)),
+                  'downdown': ','.join(map(str, dv_float - 2.*sv)),
+               }
+               step = Mnu * relative_step
+            else:
+               up       = default_value*(1.+relative_step)   if default_value != 0. else  absolute_step_val
+               upup     = default_value*(1.+2.*relative_step) if default_value != 0. else  2.*absolute_step_val
+               down     = default_value*(1.-relative_step)   if default_value != 0. else -absolute_step_val
+               downdown = default_value*(1.-2.*relative_step) if default_value != 0. else -2.*absolute_step_val
+               step     = default_value*relative_step         if default_value != 0. else  absolute_step_val
+               stencil_vals = {'up': up, 'upup': upup, 'down': down, 'downdown': downdown}
 
-         stencil_keys = ['up', 'upup', 'down', 'downdown'] if five_point else ['up', 'down']
+            stencil_keys = ['up', 'upup', 'down', 'downdown'] if five_point else ['up', 'down']
 
-         # Collect all output filenames; skip CLASS stencil if all exist
-         ckk_fname = deriv_dir+'Ckk_'+free_param+'.txt'
-         all_fnames = [ckk_fname]
-         for i in range(len(zs)-1):
-            zstr = str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))
-            for j in range(npairs):
-               s1, s2 = self.index2sample(j)
-               name1 = self.experiment.samples[s1]
-               name2 = self.experiment.samples[s2]
-               all_fnames.append(deriv_dir+'C'+name1+name2+'_'+free_param+'_'+zstr+'.txt')
-            for j in range(nsamples):
-               name1 = self.experiment.samples[j]
-               all_fnames.append(deriv_dir+'Ck'+name1+'_'+free_param+'_'+zstr+'.txt')
-         if not overwrite and all(exists(f) for f in all_fnames):
-            continue
-
-         # Run CLASS stencil: one compute() per stencil point, evaluate all Cell types
-         stencil_cell = {key: {} for key in stencil_keys}
-         for key in stencil_keys:
-            self.cosmo.set({class_param: stencil_vals[key]})
-            self.cosmo.compute()
-            stencil_cell[key]['kk'] = compute_lensing_Cell(self, 'k', 'k')
+            # Collect all output filenames; skip CLASS stencil if all exist
+            ckk_fname = deriv_dir+'Ckk_'+free_param+'.txt'
+            all_fnames = [ckk_fname]
             for i in range(len(zs)-1):
-               zmin, zmax_bin = zs[i], zs[i+1]
-               zmid = (zmin+zmax_bin)/2
+               zstr = str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))
                for j in range(npairs):
                   s1, s2 = self.index2sample(j)
-                  ba  = compute_b(self, zmid, s1)
-                  bb  = compute_b(self, zmid, s2)
-                  b2a = self.experiment.b2[s1](zmid)
-                  b2b = self.experiment.b2[s2](zmid)
-                  alpha0a = self.experiment.alpha0[s1](zmid)
-                  alpha0b = self.experiment.alpha0[s2](zmid)
-                  noise_val = (self.experiment.fover[self.sample2index(s1,s2)] /
-                               np.sqrt(compute_n(self,zmid,s1)*compute_n(self,zmid,s2))
-                               ) if s1==s2 else 0
-                  stencil_cell[key][(i, j, 'gg')] = compute_lensing_Cell(
-                     self, s1, s2, zmin=zmin, zmax=zmax_bin, zmid=zmid,
-                     ba=ba, bb=bb, b2a=b2a, b2b=b2b,
-                     bsa=-2*(ba-1)/7, bsb=-2*(bb-1)/7,
-                     alpha0a=alpha0a, alpha0b=alpha0b, N=noise_val)
+                  name1 = self.experiment.samples[s1]
+                  name2 = self.experiment.samples[s2]
+                  all_fnames.append(deriv_dir+'C'+name1+name2+'_'+free_param+'_'+zstr+'.txt')
                for j in range(nsamples):
-                  bb  = compute_b(self, zmid, j)
-                  b2b = self.experiment.b2[j](zmid)
-                  alpha0a = self.experiment.alphak(zmid)
-                  alpha0b = self.experiment.alpha0[j](zmid)
-                  stencil_cell[key][(i, j, 'kg')] = compute_lensing_Cell(
-                     self, 'k', j, zmin=zmin, zmax=zmax_bin, zmid=zmid,
-                     ba=1, bb=bb, b2a=0, b2b=b2b,
-                     bsa=0, bsb=-2*(bb-1)/7,
-                     alpha0a=alpha0a, alpha0b=alpha0b, N=0)
-         self.cosmo.set({class_param: default_value})
-         self.cosmo.compute()
+                  name1 = self.experiment.samples[j]
+                  all_fnames.append(deriv_dir+'Ck'+name1+'_'+free_param+'_'+zstr+'.txt')
+            if not overwrite and all(exists(f) for f in all_fnames):
+               continue
 
-         # Save Ckk derivative
-         if not exists(ckk_fname) or overwrite:
-            result = stencil_formula(stencil_cell, 'kk', step, five_point)
-            if flag: result *= self.params['A_s']
-            np.savetxt(ckk_fname, result)
+            # Run CLASS stencil: one compute() per stencil point, evaluate all Cell types
+            stencil_cell = {key: {} for key in stencil_keys}
+            for key in stencil_keys:
+               self.cosmo.set({class_param: stencil_vals[key]})
+               self.cosmo.compute()
+               stencil_cell[key]['kk'] = compute_lensing_Cell(self, 'k', 'k')
+               for i in range(len(zs)-1):
+                  zmin, zmax_bin = zs[i], zs[i+1]
+                  zmid = (zmin+zmax_bin)/2
+                  for j in range(npairs):
+                     s1, s2 = self.index2sample(j)
+                     ba  = compute_b(self, zmid, s1)
+                     bb  = compute_b(self, zmid, s2)
+                     b2a = self.experiment.b2[s1](zmid)
+                     b2b = self.experiment.b2[s2](zmid)
+                     alpha0a = self.experiment.alpha0[s1](zmid)
+                     alpha0b = self.experiment.alpha0[s2](zmid)
+                     noise_val = (self.experiment.fover[self.sample2index(s1,s2)] /
+                                  np.sqrt(compute_n(self,zmid,s1)*compute_n(self,zmid,s2))
+                                  ) if s1==s2 else 0
+                     stencil_cell[key][(i, j, 'gg')] = compute_lensing_Cell(
+                        self, s1, s2, zmin=zmin, zmax=zmax_bin, zmid=zmid,
+                        ba=ba, bb=bb, b2a=b2a, b2b=b2b,
+                        bsa=-2*(ba-1)/7, bsb=-2*(bb-1)/7,
+                        alpha0a=alpha0a, alpha0b=alpha0b, N=noise_val)
+                  for j in range(nsamples):
+                     bb  = compute_b(self, zmid, j)
+                     b2b = self.experiment.b2[j](zmid)
+                     alpha0a = self.experiment.alphak(zmid)
+                     alpha0b = self.experiment.alpha0[j](zmid)
+                     stencil_cell[key][(i, j, 'kg')] = compute_lensing_Cell(
+                        self, 'k', j, zmin=zmin, zmax=zmax_bin, zmid=zmid,
+                        ba=1, bb=bb, b2a=0, b2b=b2b,
+                        bsa=0, bsb=-2*(bb-1)/7,
+                        alpha0a=alpha0a, alpha0b=alpha0b, N=0)
+            self.cosmo.set({class_param: default_value})
+            self.cosmo.compute()
 
-         # Save Cgg and Ckg derivatives
-         for i in range(len(zs)-1):
-            zstr = str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))
-            for j in range(npairs):
-               s1, s2 = self.index2sample(j)
-               name1 = self.experiment.samples[s1]
-               name2 = self.experiment.samples[s2]
-               fname = deriv_dir+'C'+name1+name2+'_'+free_param+'_'+zstr+'.txt'
-               if not exists(fname) or overwrite:
-                  result = stencil_formula(stencil_cell, (i, j, 'gg'), step, five_point)
-                  if flag: result *= self.params['A_s']
-                  np.savetxt(fname, result)
-            for j in range(nsamples):
-               name1 = self.experiment.samples[j]
-               fname = deriv_dir+'Ck'+name1+'_'+free_param+'_'+zstr+'.txt'
-               if not exists(fname) or overwrite:
-                  result = stencil_formula(stencil_cell, (i, j, 'kg'), step, five_point)
-                  if flag: result *= self.params['A_s']
-                  np.savetxt(fname, result)
+            # Save Ckk derivative
+            if not exists(ckk_fname) or overwrite:
+               result = stencil_formula(stencil_cell, 'kk', step, five_point)
+               if flag: result *= self.params['A_s']
+               np.savetxt(ckk_fname, result)
+
+            # Save Cgg and Ckg derivatives
+            for i in range(len(zs)-1):
+               zstr = str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))
+               for j in range(npairs):
+                  s1, s2 = self.index2sample(j)
+                  name1 = self.experiment.samples[s1]
+                  name2 = self.experiment.samples[s2]
+                  fname = deriv_dir+'C'+name1+name2+'_'+free_param+'_'+zstr+'.txt'
+                  if not exists(fname) or overwrite:
+                     result = stencil_formula(stencil_cell, (i, j, 'gg'), step, five_point)
+                     if flag: result *= self.params['A_s']
+                     np.savetxt(fname, result)
+               for j in range(nsamples):
+                  name1 = self.experiment.samples[j]
+                  fname = deriv_dir+'Ck'+name1+'_'+free_param+'_'+zstr+'.txt'
+                  if not exists(fname) or overwrite:
+                     result = stencil_formula(stencil_cell, (i, j, 'kg'), step, five_point)
+                     if flag: result *= self.params['A_s']
+                     np.savetxt(fname, result)
 
       # -----------------------------------------------------------------------
       # All other params (bias, f_NL, gamma, ...): use compute_dCdp unchanged
