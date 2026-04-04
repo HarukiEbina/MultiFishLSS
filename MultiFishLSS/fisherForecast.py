@@ -3,6 +3,7 @@ from headers import *
 from twoPoint import *
 from twoPointNoise import *
 from multiprocessing import Pool
+import multiprocessing as _mp
 from functools import partial
 import os, json
 from os.path import exists
@@ -10,6 +11,254 @@ from scipy.integrate import simpson as simps
 from scipy.special import legendre
 import matplotlib.pyplot as plt
 
+
+# ---------------------------------------------------------------------------
+# Module-level standalone helpers — must live outside the class so that
+# multiprocessing.get_context('spawn') can pickle them.
+# ---------------------------------------------------------------------------
+
+def _index2sample(index, nsample):
+   """Pure-logic equivalent of fisherForecast.index2sample."""
+   count = 0; ind1 = 0; ind2 = 0
+   for i in range(nsample - 1):
+      if index < count + nsample - i:
+         break
+      ind1 += 1
+      count += nsample - i
+   ind2 = index - count + ind1
+   return ind1, ind2
+
+
+def _dPdk(P, k, Nk, Nmu):
+   """Pure-array equivalent of fisherForecast.dPdk."""
+   P_reshaped = P.reshape((Nk, Nmu))
+   P_low  = np.roll(P_reshaped,  1, axis=0)
+   P_low2 = np.roll(P_reshaped,  2, axis=0)
+   P_low3 = np.roll(P_reshaped,  3, axis=0)
+   P_low4 = np.roll(P_reshaped,  4, axis=0)
+   P_hi   = np.roll(P_reshaped, -1, axis=0)
+   P_hi2  = np.roll(P_reshaped, -2, axis=0)
+   P_hi3  = np.roll(P_reshaped, -3, axis=0)
+   P_hi4  = np.roll(P_reshaped, -4, axis=0)
+   dP     = (-P_hi2 + 8.*P_hi - 8.*P_low + P_low2) / 12.
+   dP_low = -(-3.*P_low4 + 16.*P_low3 - 36.*P_low2 + 48.*P_low - 25.*P_reshaped) / 12.
+   dP_hi  = (-3.*P_hi4 + 16.*P_hi3 - 36.*P_hi2 + 48.*P_hi - 25.*P_reshaped) / 12.
+   dP[:5,  :] = dP_hi[:5,  :]
+   dP[-5:, :] = dP_low[-5:, :]
+   ks   = k.reshape((Nk, Nmu))[:, 0]
+   dlnk = np.log(ks)[1] - np.log(ks)[0]
+   return dP.flatten() / dlnk / k
+
+
+def _dPdmu(P, mu, Nk, Nmu):
+   """Pure-array equivalent of fisherForecast.dPdmu."""
+   P_reshaped = P.reshape((Nk, Nmu))
+   P_low  = np.roll(P_reshaped,  1, axis=1)
+   P_low2 = np.roll(P_reshaped,  2, axis=1)
+   P_low3 = np.roll(P_reshaped,  3, axis=1)
+   P_low4 = np.roll(P_reshaped,  4, axis=1)
+   P_hi   = np.roll(P_reshaped, -1, axis=1)
+   P_hi2  = np.roll(P_reshaped, -2, axis=1)
+   P_hi3  = np.roll(P_reshaped, -3, axis=1)
+   P_hi4  = np.roll(P_reshaped, -4, axis=1)
+   dP     = (-P_hi2 + 8.*P_hi - 8.*P_low + P_low2) / 12.
+   dP_low = -(-3.*P_low4 + 16.*P_low3 - 36.*P_low2 + 48.*P_low - 25.*P_reshaped) / 12.
+   dP_hi  = (-3.*P_hi4 + 16.*P_hi3 - 36.*P_hi2 + 48.*P_hi - 25.*P_reshaped) / 12.
+   dP[:,  :5] = dP_hi[:,  :5]
+   dP[:, -5:] = dP_low[:, -5:]
+   dmu = mu[1] - mu[0]
+   return dP.flatten() / dmu
+
+
+def _pell_fname(free_param, z, name1, name2, basedir, name, folder,
+                log10z_c, omega_lin, omega_log):
+   """Return the output file path for dP/d(free_param) at redshift z for pair (name1,name2)."""
+   if free_param == 'fEDE':
+      base = 'fEDE_' + str(int(1000.*log10z_c)) + '_' + str(round(100*z)) + '.txt'
+   elif free_param == 'A_lin':
+      base = 'A_lin_' + str(int(100.*omega_lin)) + '_' + str(round(100*z)) + '.txt'
+   elif free_param == 'A_log':
+      base = 'A_log_' + str(int(100.*omega_log)) + '_' + str(round(100*z)) + '.txt'
+   else:
+      base = free_param + '_' + str(round(100*z)) + '.txt'
+   return basedir + 'output/' + name + folder + 'P' + name1 + name2 + '_' + base
+
+
+def _lpt_pkmu(bpoly, lpt_tables, mu, Nmu):
+   """
+   LPT table contraction → P(k,mu).  Inline equivalent of the lpt_tables-provided
+   branch inside compute_tracer_power_spectrum, with no fishcast dependency.
+   bpoly: (19,) array.  lpt_tables: (kv, p0ktable, p2ktable, p4ktable).
+   Returns array of length Nk*Nmu.
+   """
+   kv, p0k, p2k, p4k = lpt_tables
+   p0 = np.repeat(np.sum(p0k * bpoly, axis=1), Nmu)
+   p2 = np.repeat(np.sum(p2k * bpoly, axis=1), Nmu)
+   p4 = np.repeat(np.sum(p4k * bpoly, axis=1), Nmu)
+   return p0 + 0.5*(3*mu**2 - 1)*p2 + 0.125*(35*mu**4 - 30*mu**2 + 3)*p4
+
+
+def _build_pell_param_args(free_param, params, default_step, five_point, overwrite):
+   """
+   Build the picklable per-param portion of the worker args dict.
+   Returns a dict with keys: free_param, class_param, default_value,
+   stencil_vals, stencil_keys, step, flag, five_point, overwrite.
+   """
+   flag        = (free_param == 'log(A_s)')
+   class_param = 'A_s' if flag else free_param
+   relative_step     = default_step.get(class_param, 0.01)
+   absolute_step_val = default_step.get(class_param, 0.01)
+   default_value     = params[class_param]
+
+   if class_param == 'm_ncdm' and params.get('N_ncdm', 1) > 1:
+      dv_float = np.array(list(map(float, default_value.split(','))))
+      Mnu  = sum(dv_float)
+      sv   = relative_step * Mnu / params['N_ncdm']
+      stencil_vals = {
+         'up':       ','.join(map(str, dv_float + sv)),
+         'upup':     ','.join(map(str, dv_float + 2.*sv)),
+         'down':     ','.join(map(str, dv_float - sv)),
+         'downdown': ','.join(map(str, dv_float - 2.*sv)),
+      }
+      step = Mnu * relative_step
+   else:
+      up       = default_value*(1.+relative_step)   if default_value != 0. else  absolute_step_val
+      upup     = default_value*(1.+2.*relative_step) if default_value != 0. else  2.*absolute_step_val
+      down     = default_value*(1.-relative_step)   if default_value != 0. else -absolute_step_val
+      downdown = default_value*(1.-2.*relative_step) if default_value != 0. else -2.*absolute_step_val
+      step     = default_value*relative_step         if default_value != 0. else  absolute_step_val
+      stencil_vals = {'up': up, 'upup': upup, 'down': down, 'downdown': downdown}
+
+   stencil_keys = ['up', 'upup', 'down', 'downdown'] if five_point else ['up', 'down']
+   return dict(
+      free_param=free_param, class_param=class_param,
+      default_value=default_value, stencil_vals=stencil_vals,
+      stencil_keys=stencil_keys, step=step, flag=flag,
+      five_point=five_point, overwrite=overwrite,
+   )
+
+
+def _pell_cosmo_param_worker(args):
+   """
+   Spawn-safe worker for one _standard_cosmo param in compute_derivatives.
+   Receives only picklable data; reconstructs Class() and interp1d locally.
+   Parallelism is at the param level: one worker handles all z-bins and tracer
+   pairs for its assigned param.
+   """
+   free_param    = args['free_param']
+   class_param   = args['class_param']
+   default_value = args['default_value']
+   stencil_vals  = args['stencil_vals']
+   stencil_keys  = args['stencil_keys']
+   step          = args['step']
+   flag          = args['flag']
+   five_point    = args['five_point']
+   overwrite     = args['overwrite']
+   params        = args['params']
+   k             = args['k']
+   mu            = args['mu']
+   Nk            = args['Nk']
+   Nmu           = args['Nmu']
+   klin          = args['klin']
+   AP            = args['AP']
+   A_s           = args['A_s']
+   bvec_data     = args['bvec_data']
+   fid_lpt_list  = args['fid_lpt_list']
+   fid_bpoly_data = args['fid_bpoly_data']
+   zs            = args['zs']
+   basedir       = args['basedir']
+   name          = args['name']
+   folder        = args['folder']
+   samples       = args['samples']
+   npairs        = args['npairs']
+   nsamples      = args['nsamples']
+   log10z_c      = args['log10z_c']
+   omega_lin     = args['omega_lin']
+   omega_log     = args['omega_log']
+
+   Da_fid = interp1d(args['Da_fid_z'], args['Da_fid_v'], kind='linear')
+   Hz_fid = interp1d(args['Hz_fid_z'], args['Hz_fid_v'], kind='linear')
+
+   # Short-circuit: skip entirely if all output files already exist.
+   all_fnames = [
+      _pell_fname(free_param, z, samples[s1], samples[s2],
+                  basedir, name, folder, log10z_c, omega_lin, omega_log)
+      for z in zs
+      for j in range(npairs)
+      for s1, s2 in [_index2sample(j, nsamples)]
+   ]
+   if not overwrite and all(exists(f) for f in all_fnames):
+      return
+
+   # Fresh CLASS instance — isolated from parent and other workers.
+   cosmo = Class()
+   cosmo.set(params)
+   cosmo.compute()
+
+   try:
+      # CLASS stencil: 4 (or 2) compute() calls, plin/AP scalars for every z.
+      stencil_data = {key: {} for key in stencil_keys}
+      for key in stencil_keys:
+         cosmo.set({class_param: stencil_vals[key]})
+         cosmo.compute()
+         h = cosmo.h()
+         for z in zs:
+            plin  = np.array([cosmo.pk_cb_lin(ki*h, z)*h**3. for ki in klin])
+            aperp = cosmo.angular_distance(z)*h / Da_fid(z)
+            apar  = Hz_fid(z) / (cosmo.Hubble(z)*299792.458/h)
+            f_z   = cosmo.scale_independent_growth_factor_f(z)
+            stencil_data[key][z] = (plin, aperp, apar, f_z)
+      cosmo.set({class_param: default_value})
+      cosmo.compute()  # restore fiducial in local instance
+
+      for z_idx, z in enumerate(zs):
+         # LPT tables built once per (z, stencil key) — shared across tracer pairs.
+         lpt_tbls = {key: compute_lpt_tables(klin, stencil_data[key][z][0],
+                                             stencil_data[key][z][3])
+                     for key in stencil_keys}
+
+         for j in range(npairs):
+            s1, s2 = _index2sample(j, nsamples)
+            fname  = _pell_fname(free_param, z, samples[s1], samples[s2],
+                                 basedir, name, folder, log10z_c, omega_lin, omega_log)
+            if exists(fname) and not overwrite:
+               continue
+
+            bveca, bvecb, N, N2, N4 = bvec_data[(j, z_idx)]
+
+            P = {}
+            for key in stencil_keys:
+               f_s   = stencil_data[key][z][3]
+               bpoly = compute_biaspoly(list(bveca), list(bvecb), f=f_s)
+               bpoly[16:] = np.array([N, N2, N4])
+               P[key] = _lpt_pkmu(bpoly, lpt_tbls[key], mu, Nmu)
+
+            if five_point:
+               result   = (-P['upup'] + 8.*P['up'] - 8.*P['down'] + P['downdown']) / (12.*step)
+               daperpdp = (-stencil_data['upup'][z][1] + 8.*stencil_data['up'][z][1]
+                           - 8.*stencil_data['down'][z][1] + stencil_data['downdown'][z][1]) / (12.*step)
+               dapardp  = (-stencil_data['upup'][z][2] + 8.*stencil_data['up'][z][2]
+                           - 8.*stencil_data['down'][z][2] + stencil_data['downdown'][z][2]) / (12.*step)
+            else:
+               result   = (P['up'] - P['down']) / (2.*step)
+               daperpdp = (stencil_data['up'][z][1] - stencil_data['down'][z][1]) / (2.*step)
+               dapardp  = (stencil_data['up'][z][2] - stencil_data['down'][z][2]) / (2.*step)
+
+            if AP:
+               P_fid_jp = _lpt_pkmu(fid_bpoly_data[(j, z_idx)], fid_lpt_list[z_idx], mu, Nmu)
+               result -= (dapardp + 2.*daperpdp)*P_fid_jp
+               result -= mu*(1.-mu**2)*(dapardp-daperpdp)*_dPdmu(P_fid_jp, mu, Nk, Nmu)
+               result -= k*(dapardp*mu**2 + daperpdp*(1.-mu**2))*_dPdk(P_fid_jp, k, Nk, Nmu)
+
+            if flag:
+               result *= A_s
+            np.savetxt(fname, result)
+   finally:
+      cosmo.struct_cleanup()
+      cosmo.empty()
+
+
+# ---------------------------------------------------------------------------
 
 class fisherForecast(object):
    '''
@@ -421,16 +670,7 @@ class fisherForecast(object):
    def index2sample(self,index):
        nsample=len(self.experiment.b)
        if index>=nsample*(nsample+1)/2: print('invalid index')
-       count=0
-       ind1=0
-       ind2=0
-       for i in range(nsample-1):         
-           if index<count+nsample-i:
-               break
-           ind1+=1
-           count+=nsample-i
-       ind2=index-count+ind1
-       return ind1,ind2
+       return _index2sample(index, nsample)
 
    def sample2index(self,sample1,sample2):
        if sample1>sample2:
@@ -513,58 +753,24 @@ class fisherForecast(object):
       
    def dPdk(self,P):
       '''
-      Given an input array P (length Nk*Nmu), which is 
-      defined on the (flattened) k-mu grid, returns 
-      dPdk on that same grid. 
-      
+      Given an input array P (length Nk*Nmu), which is
+      defined on the (flattened) k-mu grid, returns
+      dPdk on that same grid.
+
       assumes that k is log spaced
       '''
-      P_reshaped = P.reshape((self.Nk,self.Nmu)) 
-      P_low  = np.roll(P_reshaped,1,axis=0)
-      P_low2 = np.roll(P_reshaped,2,axis=0)
-      P_low3 = np.roll(P_reshaped,3,axis=0) 
-      P_low4 = np.roll(P_reshaped,4,axis=0)
-      P_hi   = np.roll(P_reshaped,-1,axis=0)
-      P_hi2  = np.roll(P_reshaped,-2,axis=0)
-      P_hi3  = np.roll(P_reshaped,-3,axis=0)
-      P_hi4  = np.roll(P_reshaped,-4,axis=0)
-      dP     = (-P_hi2 + 8.*P_hi - 8.*P_low + P_low2) / 12.
-      dP_low = -(-3.*P_low4 + 16.*P_low3 - 36.*P_low2 + 48.*P_low - 25.*P_reshaped)/12.
-      dP_hi  = (-3.*P_hi4 + 16.*P_hi3 - 36.*P_hi2 + 48.*P_hi - 25.*P_reshaped)/12.
-      # correct for "edge effects"
-      dP[:5,:] = dP_hi[:5,:]
-      dP[-5:,:] = dP_low[-5:,:]  
-      ks = self.k.reshape((self.Nk,self.Nmu))[:,0]
-      dlnk = np.log(ks)[1]-np.log(ks)[0] 
-      dPdk = dP.flatten()/dlnk/self.k
-      return dPdk
+      return _dPdk(P, self.k, self.Nk, self.Nmu)
    
    
    def dPdmu(self,P):
       '''
-      Given an input array P (length Nk*Nmu), which is 
-      defined on the (flattened) k-mu grid, returns 
-      dPdmu on that same grid. 
-      
-      ssumes that mu is lin spaced
+      Given an input array P (length Nk*Nmu), which is
+      defined on the (flattened) k-mu grid, returns
+      dPdmu on that same grid.
+
+      assumes that mu is lin spaced
       '''
-      P_reshaped = P.reshape((self.Nk,self.Nmu)) 
-      P_low  = np.roll(P_reshaped,1,axis=1)
-      P_low2 = np.roll(P_reshaped,2,axis=1)
-      P_low3 = np.roll(P_reshaped,3,axis=1) 
-      P_low4 = np.roll(P_reshaped,4,axis=1)
-      P_hi   = np.roll(P_reshaped,-1,axis=1)
-      P_hi2  = np.roll(P_reshaped,-2,axis=1)
-      P_hi3  = np.roll(P_reshaped,-3,axis=1)
-      P_hi4  = np.roll(P_reshaped,-4,axis=1)
-      dP     = (-P_hi2 + 8.*P_hi - 8.*P_low + P_low2) / 12.
-      dP_low = -(-3.*P_low4 + 16.*P_low3 - 36.*P_low2 + 48.*P_low - 25.*P_reshaped)/12.
-      dP_hi  = (-3.*P_hi4 + 16.*P_hi3 - 36.*P_hi2 + 48.*P_hi - 25.*P_reshaped)/12.
-      # correct for "edge effects"
-      dP[:,:5] = dP_hi[:,:5]
-      dP[:,-5:] = dP_low[:,-5:] 
-      dmu = self.mu[1] - self.mu[0]
-      return dP.flatten()/dmu
+      return _dPdmu(P, self.mu, self.Nk, self.Nmu)
     
     
    def compute_dPdp(self, param,X,Y, z, relative_step=-1., absolute_step=-1., 
@@ -1221,7 +1427,7 @@ class fisherForecast(object):
     
 
    
-   def compute_derivatives(self, five_point=True, parameters=None, z=None, overwrite=False):
+   def compute_derivatives(self, five_point=True, parameters=None, z=None, overwrite=False, n_workers=1):
       '''
       Calculates all the derivatives and saves them to the 
       output/forecast name/derivatives directory
@@ -1271,114 +1477,194 @@ class fisherForecast(object):
 
       default_step = {'tau_reio': 0.3, 'm_ncdm': 0.05, 'A_lin': 0.002, 'A_log': 0.002}
 
-      for free_param in _standard_cosmo:
-         flag = (free_param == 'log(A_s)')
-         class_param = 'A_s' if flag else free_param
+      if n_workers > 1 and _standard_cosmo:
+         # ------------------------------------------------------------------
+         # Parallel path (spawn): precompute all experiment-dependent data in
+         # the main process (experiment has lambdas, not picklable), then
+         # dispatch one worker per _standard_cosmo param.
+         # ------------------------------------------------------------------
 
-         relative_step = default_step.get(class_param, 0.01)
-         absolute_step_val = default_step.get(class_param, 0.01)
-         default_value = self.params[class_param]
+         # Fiducial distances for workers — recomputed from cosmo_fid so we
+         # never rely on interp1d's internal attribute layout.
+         _z_grid = np.linspace(0, 60, 1000)
+         _h_fid  = self.cosmo_fid.h()
+         _c      = 299792.458
+         Da_fid_z = _z_grid
+         Da_fid_v = np.array([self.cosmo_fid.angular_distance(z)*_h_fid for z in _z_grid])
+         Hz_fid_z = _z_grid
+         Hz_fid_v = np.array([self.cosmo_fid.Hubble(z)*_c/_h_fid for z in _z_grid])
 
-         if class_param == 'm_ncdm' and self.params['N_ncdm'] > 1:
-            dv_float = np.array(list(map(float, default_value.split(','))))
-            Mnu = sum(dv_float)
-            sv = relative_step * Mnu / self.params['N_ncdm']
-            stencil_vals = {
-               'up':       ','.join(map(str, dv_float + sv)),
-               'upup':     ','.join(map(str, dv_float + 2.*sv)),
-               'down':     ','.join(map(str, dv_float - sv)),
-               'downdown': ','.join(map(str, dv_float - 2.*sv)),
-            }
-            step = Mnu * relative_step
-         else:
-            up       = default_value*(1.+relative_step)    if default_value != 0. else  absolute_step_val
-            upup     = default_value*(1.+2.*relative_step)  if default_value != 0. else  2.*absolute_step_val
-            down     = default_value*(1.-relative_step)    if default_value != 0. else -absolute_step_val
-            downdown = default_value*(1.-2.*relative_step)  if default_value != 0. else -2.*absolute_step_val
-            step     = default_value*relative_step          if default_value != 0. else  absolute_step_val
-            stencil_vals = {'up': up, 'upup': upup, 'down': down, 'downdown': downdown}
+         # Per-(j, z_idx): bias vectors and noise terms (independent of stencil param).
+         # For AP: also need fiducial LPT tables and fiducial bpoly.
+         bvec_data      = {}
+         fid_bpoly_data = {}
+         fid_lpt_list   = []
+         h_fid_cosmo    = self.cosmo.h()  # cosmo is at fiducial at this point
 
-         stencil_keys = ['up', 'upup', 'down', 'downdown'] if five_point else ['up', 'down']
+         for z_idx, z in enumerate(zs):
+            f_fid = self.cosmo_fid.scale_independent_growth_factor_f(z)
 
-         # Short-circuit: skip CLASS stencil entirely if all output files exist.
-         _all_fnames = []
-         for z in zs:
-            if free_param == 'fEDE': _base = 'fEDE_'+str(int(1000.*self.log10z_c))+'_'+str(round(100*z))+'.txt'
-            elif free_param == 'A_lin': _base = 'A_lin_'+str(int(100.*self.omega_lin))+'_'+str(round(100*z))+'.txt'
-            elif free_param == 'A_log': _base = 'A_log_'+str(int(100.*self.omega_log))+'_'+str(round(100*z))+'.txt'
-            else: _base = free_param+'_'+str(round(100*z))+'.txt'
-            for j in range(npairs):
-               s1, s2 = self.index2sample(j)
-               _all_fnames.append(self.basedir+'output/'+self.name+folder+'P'+self.experiment.samples[s1]+self.experiment.samples[s2]+'_'+_base)
-         if not overwrite and all(exists(f) for f in _all_fnames):
-            continue
-
-         # Run CLASS once per stencil point; store plin, AP scalars, and f for all z.  Total CLASS calls: 4 (or 2).
-         stencil_data = {key: {} for key in stencil_keys}
-         for key in stencil_keys:
-            self.cosmo.set({class_param: stencil_vals[key]})
-            self.cosmo.compute()
-            h = self.cosmo.h()
-            for z in zs:
-               plin = np.array([self.cosmo.pk_cb_lin(k*h, z)*h**3. for k in klin])
-               aperp = self.cosmo.angular_distance(z)*h / self.Da_fid(z)
-               apar  = self.Hz_fid(z) / (self.cosmo.Hubble(z)*299792.458/h)
-               f_z   = self.cosmo.scale_independent_growth_factor_f(z)
-               stencil_data[key][z] = (plin, aperp, apar, f_z)
-         self.cosmo.set({class_param: default_value})
-         self.cosmo.compute()
-
-         # Build fid_lpt_tables lazily on the first param that runs its stencil.
-         # (self.cosmo has just been restored to fiducial above.)
-         if self.AP and not fid_lpt_tables:
-            h_fid = self.cosmo.h()
-            for z in zs:
-               plin_fid_z = np.array([self.cosmo.pk_cb_lin(k*h_fid, z)*h_fid**3. for k in klin])
-               f_fid_z = self.cosmo_fid.scale_independent_growth_factor_f(z)
-               fid_lpt_tables[z] = compute_lpt_tables(klin, plin_fid_z, f_fid_z)
-
-         for z in zs:
-            # LPT tables built once per (z, stencil point) — shared across
-            # all tracer pairs.
-            lpt_tbls = {key: compute_lpt_tables(klin, stencil_data[key][z][0],
-                                                stencil_data[key][z][3])
-                        for key in stencil_keys}
+            if self.AP:
+               plin_fid = np.array([self.cosmo.pk_cb_lin(ki*h_fid_cosmo, z)*h_fid_cosmo**3.
+                                    for ki in klin])
+               fid_lpt_list.append(compute_lpt_tables(klin, plin_fid, f_fid))
+            else:
+               fid_lpt_list.append(None)
 
             for j in range(npairs):
                s1, s2 = self.index2sample(j)
-               if free_param == 'fEDE': base = 'fEDE_'+str(int(1000.*self.log10z_c))+'_'+str(round(100*z))+'.txt'
-               elif free_param == 'A_lin': base = 'A_lin_'+str(int(100.*self.omega_lin))+'_'+str(round(100*z))+'.txt'
-               elif free_param == 'A_log': base = 'A_log_'+str(int(100.*self.omega_log))+'_'+str(round(100*z))+'.txt'
-               else: base = free_param+'_'+str(round(100*z))+'.txt'
-               fname = self.basedir+'output/'+self.name+folder+'P'+self.experiment.samples[s1]+self.experiment.samples[s2]+'_'+base
-               if exists(fname) and not overwrite:
-                  continue
-
-               P = {key: compute_tracer_power_spectrum(self, s1, s2, z,
-                          f=stencil_data[key][z][3], lpt_tables=lpt_tbls[key])
-                    for key in stencil_keys}
-
-               if five_point:
-                  result = (-P['upup'] + 8.*P['up'] - 8.*P['down'] + P['downdown']) / (12.*step)
-                  daperpdp = (-stencil_data['upup'][z][1] + 8.*stencil_data['up'][z][1]
-                              - 8.*stencil_data['down'][z][1] + stencil_data['downdown'][z][1]) / (12.*step)
-                  dapardp  = (-stencil_data['upup'][z][2] + 8.*stencil_data['up'][z][2]
-                              - 8.*stencil_data['down'][z][2] + stencil_data['downdown'][z][2]) / (12.*step)
-               else:
-                  result = (P['up'] - P['down']) / (2.*step)
-                  daperpdp = (stencil_data['up'][z][1] - stencil_data['down'][z][1]) / (2.*step)
-                  dapardp  = (stencil_data['up'][z][2] - stencil_data['down'][z][2]) / (2.*step)
-
+               # bveca, bvecb do not depend on f — pass any f to suppress the
+               # fallback CLASS call inside get_biaspoly.
+               bveca, bvecb = get_biaspoly(self, s1, s2, z, f=f_fid, get_bvec=True)
+               # Call again (without get_bvec) to obtain N, N2, N4 from bpoly[16:].
+               full_bpoly = get_biaspoly(self, s1, s2, z, f=f_fid)
+               bvec_data[(j, z_idx)] = (
+                  list(bveca), list(bvecb),
+                  float(full_bpoly[16]), float(full_bpoly[17]), float(full_bpoly[18]),
+               )
                if self.AP:
-                  P_fid_jp = compute_tracer_power_spectrum(self, s1, s2, z,
-                                lpt_tables=fid_lpt_tables[z])
-                  K, MU = self.k, self.mu
-                  result -= (dapardp + 2.*daperpdp)*P_fid_jp
-                  result -= MU*(1.-MU**2)*(dapardp-daperpdp)*self.dPdmu(P_fid_jp)
-                  result -= K*(dapardp*MU**2 + daperpdp*(1.-MU**2))*self.dPdk(P_fid_jp)
+                  fid_bpoly_data[(j, z_idx)] = full_bpoly
 
-               if flag: result *= self.params['A_s']
-               np.savetxt(fname, result)
+         # Shared data sent to every worker (picklable: arrays, dicts, scalars).
+         shared = dict(
+            k=self.k, mu=self.mu, Nk=self.Nk, Nmu=self.Nmu, klin=klin,
+            params=dict(self.params),
+            Da_fid_z=Da_fid_z, Da_fid_v=Da_fid_v,
+            Hz_fid_z=Hz_fid_z, Hz_fid_v=Hz_fid_v,
+            AP=self.AP,
+            A_s=self.params.get('A_s'),
+            bvec_data=bvec_data,
+            fid_lpt_list=fid_lpt_list,
+            fid_bpoly_data=fid_bpoly_data,
+            zs=list(zs),
+            basedir=self.basedir, name=self.name, folder=folder,
+            samples=list(self.experiment.samples),
+            npairs=npairs, nsamples=nsamples,
+            log10z_c=self.log10z_c, omega_lin=self.omega_lin, omega_log=self.omega_log,
+         )
+
+         param_args = [
+            {**shared, **_build_pell_param_args(p, dict(self.params), default_step,
+                                                five_point, overwrite)}
+            for p in _standard_cosmo
+         ]
+
+         with _mp.get_context('spawn').Pool(processes=n_workers) as pool:
+            pool.map(_pell_cosmo_param_worker, param_args)
+
+      else:
+         # ------------------------------------------------------------------
+         # Serial path — unchanged from Step 3.
+         # ------------------------------------------------------------------
+
+         for free_param in _standard_cosmo:
+            flag = (free_param == 'log(A_s)')
+            class_param = 'A_s' if flag else free_param
+
+            relative_step = default_step.get(class_param, 0.01)
+            absolute_step_val = default_step.get(class_param, 0.01)
+            default_value = self.params[class_param]
+
+            if class_param == 'm_ncdm' and self.params['N_ncdm'] > 1:
+               dv_float = np.array(list(map(float, default_value.split(','))))
+               Mnu = sum(dv_float)
+               sv = relative_step * Mnu / self.params['N_ncdm']
+               stencil_vals = {
+                  'up':       ','.join(map(str, dv_float + sv)),
+                  'upup':     ','.join(map(str, dv_float + 2.*sv)),
+                  'down':     ','.join(map(str, dv_float - sv)),
+                  'downdown': ','.join(map(str, dv_float - 2.*sv)),
+               }
+               step = Mnu * relative_step
+            else:
+               up       = default_value*(1.+relative_step)    if default_value != 0. else  absolute_step_val
+               upup     = default_value*(1.+2.*relative_step)  if default_value != 0. else  2.*absolute_step_val
+               down     = default_value*(1.-relative_step)    if default_value != 0. else -absolute_step_val
+               downdown = default_value*(1.-2.*relative_step)  if default_value != 0. else -2.*absolute_step_val
+               step     = default_value*relative_step          if default_value != 0. else  absolute_step_val
+               stencil_vals = {'up': up, 'upup': upup, 'down': down, 'downdown': downdown}
+
+            stencil_keys = ['up', 'upup', 'down', 'downdown'] if five_point else ['up', 'down']
+
+            # Short-circuit: skip CLASS stencil entirely if all output files exist.
+            _all_fnames = []
+            for z in zs:
+               if free_param == 'fEDE': _base = 'fEDE_'+str(int(1000.*self.log10z_c))+'_'+str(round(100*z))+'.txt'
+               elif free_param == 'A_lin': _base = 'A_lin_'+str(int(100.*self.omega_lin))+'_'+str(round(100*z))+'.txt'
+               elif free_param == 'A_log': _base = 'A_log_'+str(int(100.*self.omega_log))+'_'+str(round(100*z))+'.txt'
+               else: _base = free_param+'_'+str(round(100*z))+'.txt'
+               for j in range(npairs):
+                  s1, s2 = self.index2sample(j)
+                  _all_fnames.append(self.basedir+'output/'+self.name+folder+'P'+self.experiment.samples[s1]+self.experiment.samples[s2]+'_'+_base)
+            if not overwrite and all(exists(f) for f in _all_fnames):
+               continue
+
+            # Run CLASS once per stencil point; store plin, AP scalars, and f for all z.  Total CLASS calls: 4 (or 2).
+            stencil_data = {key: {} for key in stencil_keys}
+            for key in stencil_keys:
+               self.cosmo.set({class_param: stencil_vals[key]})
+               self.cosmo.compute()
+               h = self.cosmo.h()
+               for z in zs:
+                  plin = np.array([self.cosmo.pk_cb_lin(k*h, z)*h**3. for k in klin])
+                  aperp = self.cosmo.angular_distance(z)*h / self.Da_fid(z)
+                  apar  = self.Hz_fid(z) / (self.cosmo.Hubble(z)*299792.458/h)
+                  f_z   = self.cosmo.scale_independent_growth_factor_f(z)
+                  stencil_data[key][z] = (plin, aperp, apar, f_z)
+            self.cosmo.set({class_param: default_value})
+            self.cosmo.compute()
+
+            # Build fid_lpt_tables lazily on the first param that runs its stencil.
+            # (self.cosmo has just been restored to fiducial above.)
+            if self.AP and not fid_lpt_tables:
+               h_fid = self.cosmo.h()
+               for z in zs:
+                  plin_fid_z = np.array([self.cosmo.pk_cb_lin(k*h_fid, z)*h_fid**3. for k in klin])
+                  f_fid_z = self.cosmo_fid.scale_independent_growth_factor_f(z)
+                  fid_lpt_tables[z] = compute_lpt_tables(klin, plin_fid_z, f_fid_z)
+
+            for z in zs:
+               # LPT tables built once per (z, stencil point) — shared across
+               # all tracer pairs.
+               lpt_tbls = {key: compute_lpt_tables(klin, stencil_data[key][z][0],
+                                                   stencil_data[key][z][3])
+                           for key in stencil_keys}
+
+               for j in range(npairs):
+                  s1, s2 = self.index2sample(j)
+                  if free_param == 'fEDE': base = 'fEDE_'+str(int(1000.*self.log10z_c))+'_'+str(round(100*z))+'.txt'
+                  elif free_param == 'A_lin': base = 'A_lin_'+str(int(100.*self.omega_lin))+'_'+str(round(100*z))+'.txt'
+                  elif free_param == 'A_log': base = 'A_log_'+str(int(100.*self.omega_log))+'_'+str(round(100*z))+'.txt'
+                  else: base = free_param+'_'+str(round(100*z))+'.txt'
+                  fname = self.basedir+'output/'+self.name+folder+'P'+self.experiment.samples[s1]+self.experiment.samples[s2]+'_'+base
+                  if exists(fname) and not overwrite:
+                     continue
+
+                  P = {key: compute_tracer_power_spectrum(self, s1, s2, z,
+                             f=stencil_data[key][z][3], lpt_tables=lpt_tbls[key])
+                       for key in stencil_keys}
+
+                  if five_point:
+                     result = (-P['upup'] + 8.*P['up'] - 8.*P['down'] + P['downdown']) / (12.*step)
+                     daperpdp = (-stencil_data['upup'][z][1] + 8.*stencil_data['up'][z][1]
+                                 - 8.*stencil_data['down'][z][1] + stencil_data['downdown'][z][1]) / (12.*step)
+                     dapardp  = (-stencil_data['upup'][z][2] + 8.*stencil_data['up'][z][2]
+                                 - 8.*stencil_data['down'][z][2] + stencil_data['downdown'][z][2]) / (12.*step)
+                  else:
+                     result = (P['up'] - P['down']) / (2.*step)
+                     daperpdp = (stencil_data['up'][z][1] - stencil_data['down'][z][1]) / (2.*step)
+                     dapardp  = (stencil_data['up'][z][2] - stencil_data['down'][z][2]) / (2.*step)
+
+                  if self.AP:
+                     P_fid_jp = compute_tracer_power_spectrum(self, s1, s2, z,
+                                   lpt_tables=fid_lpt_tables[z])
+                     K, MU = self.k, self.mu
+                     result -= (dapardp + 2.*daperpdp)*P_fid_jp
+                     result -= MU*(1.-MU**2)*(dapardp-daperpdp)*self.dPdmu(P_fid_jp)
+                     result -= K*(dapardp*MU**2 + daperpdp*(1.-MU**2))*self.dPdk(P_fid_jp)
+
+                  if flag: result *= self.params['A_s']
+                  np.savetxt(fname, result)
 
       # -----------------------------------------------------------------------
       # All other params (bias, f_NL, special params, and all recon params)
