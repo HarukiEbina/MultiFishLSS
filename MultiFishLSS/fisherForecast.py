@@ -322,6 +322,7 @@ def _cell_cosmo_param_worker(args):
       fover=fover_lookup,
       samples=samples,
       custom_b=False,
+      sigv=args['sigv'],
    )
 
    # Fresh CLASS instance — isolated from parent and other workers.
@@ -1888,6 +1889,7 @@ class fisherForecast(object):
             deriv_dir=deriv_dir,
             A_s=self.params_fid.get('A_s'),
             linear=self.linear,
+            sigv=self.experiment.sigv,
          )
          param_args = [
             {**shared, **_build_pell_param_args(p, dict(self.params_fid), default_step,
