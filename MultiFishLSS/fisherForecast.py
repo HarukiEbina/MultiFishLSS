@@ -314,6 +314,7 @@ def _cell_cosmo_param_worker(args):
    alpha0_interps = [interp1d(z_tab, alpha0_tab[s], kind='linear', bounds_error=False, fill_value='extrapolate') for s in range(nsamples)]
    alphak_interp  =  interp1d(z_tab, alphak_tab,    kind='linear', bounds_error=False, fill_value='extrapolate')
    n_interps      = [interp1d(z_tab, n_tab[s],      kind='linear', bounds_error=False, fill_value='extrapolate') for s in range(nsamples)]
+   Hz_fid_interp  =  interp1d(z_tab, args['Hz_fid_tab'], kind='linear', bounds_error=False, fill_value='extrapolate')
 
    # Build stub experiment (SimpleNamespace, no lambdas — all picklable sources).
    exp_stub = types.SimpleNamespace(
@@ -323,6 +324,8 @@ def _cell_cosmo_param_worker(args):
       samples=samples,
       custom_b=False,
       sigv=args['sigv'],
+      N2=None,
+      bs=None,
    )
 
    # Fresh CLASS instance — isolated from parent and other workers.
@@ -336,6 +339,7 @@ def _cell_cosmo_param_worker(args):
       params=params, experiment=exp_stub, linear=linear,
    )
    stub.sample2index = lambda X, Y: (X, Y)
+   stub.Hz_fid = Hz_fid_interp
 
    try:
       # CLASS stencil: one compute() per stencil point, evaluate all Cell types.
@@ -1876,6 +1880,7 @@ class fisherForecast(object):
          _fover_lookup = np.array([[self.experiment.fover[self.sample2index(s1, s2)]
                                     for s2 in range(nsamples)]
                                    for s1 in range(nsamples)])
+         _Hz_fid_tab = np.array([self.Hz_fid(z) for z in _z_tab])
          shared = dict(
             params=dict(self.params_fid),
             ell=self.ell, k=self.k, Nk=self.Nk, Nmu=self.Nmu,
@@ -1883,6 +1888,7 @@ class fisherForecast(object):
             b_tab=_b_tab, b2_tab=_b2_tab, alpha0_tab=_alpha0_tab,
             alphak_tab=_alphak_tab, n_tab=_n_tab,
             fover_lookup=_fover_lookup,
+            Hz_fid_tab=_Hz_fid_tab,
             samples=list(self.experiment.samples),
             nsamples=nsamples, npairs=npairs,
             zs=list(zs),
