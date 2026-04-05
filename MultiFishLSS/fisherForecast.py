@@ -293,10 +293,13 @@ class fisherForecast(object):
       return True
 
 
-   def compute_fiducial_Pk(self, overwrite=False,ell_mult = None):
+   def compute_fiducial_Pk(self, overwrite=False, ell_mult=None, no_overwrite=False):
       '''
       Either compute or load fiducial full-shape power spectra
       '''
+      if no_overwrite and overwrite:
+         print("Warning: no_overwrite and overwrite both set; no_overwrite takes precedence.")
+         overwrite = False
 
       if isinstance(self.experiment.b,list):nsamples = len(self.experiment.b)
       else:nsamples=1
@@ -317,7 +320,7 @@ class fisherForecast(object):
                  fname = self.basedir+'output/'+self.name+'/derivatives/pfid_'+samplename1+samplename2+'_'+str(round(100*z))+'.txt'
                  _exp_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
                               'cosmo_params': self.params_fid, 'AP': self.AP, 'ell_mult': ell_mult}
-                 if not exists(fname) or overwrite or not self._validate_metadata(fname, _exp_meta):
+                 if not exists(fname) or (not no_overwrite and (overwrite or not self._validate_metadata(fname, _exp_meta))):
                     self.P_fid[ind,i,:] = compute_tracer_power_spectrum(self,j,k,z,ell_mult=ell_mult)
                     self._savetxt(fname, self.P_fid[ind,i,:], extra={
                        'ell_mult': ell_mult,
@@ -341,10 +344,13 @@ class fisherForecast(object):
                 self.kpar_cut[ind,i,:] = self.compute_kpar_cut(z,i,j,k,ind)
 
         
-   def compute_fiducial_Cl(self, overwrite=False):
+   def compute_fiducial_Cl(self, overwrite=False, no_overwrite=False):
       '''
       Either compute or load fiducial C_ells (Ckk, Ckg, Cgg)
       '''
+      if no_overwrite and overwrite:
+         print("Warning: no_overwrite and overwrite both set; no_overwrite takes precedence.")
+         overwrite = False
       if isinstance(self.experiment.b,list):nsamples = len(self.experiment.b)
       else:nsamples=1
       npairs = int(nsamples*(nsamples-1)/2+nsamples)
@@ -356,7 +362,7 @@ class fisherForecast(object):
       fname = self.basedir+'output/'+self.name+'/derivatives_Cl/Ckk_fid.txt'
       _exp_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
                    'cosmo_params': self.params_fid, 'AP': self.AP}
-      if not exists(fname) or overwrite or not self._validate_metadata(fname, _exp_meta):
+      if not exists(fname) or (not no_overwrite and (overwrite or not self._validate_metadata(fname, _exp_meta))):
          #self.C_fid[0,:,:] = compute_lensing_Cell(self,'k','k')
          self.Ckk_fid = compute_lensing_Cell(self,'k','k')
          self._savetxt(fname, self.Ckk_fid, extra={
@@ -376,7 +382,7 @@ class fisherForecast(object):
              fname = self.basedir+'output/'+self.name+'/derivatives_Cl/Ck'+name1+'_fid_'+str(round(100*zmin))+'_'+str(round(100*zmax))+'.txt'
              _exp_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
                           'cosmo_params': self.params_fid, 'AP': self.AP}
-             if not exists(fname) or overwrite or not self._validate_metadata(fname, _exp_meta):
+             if not exists(fname) or (not no_overwrite and (overwrite or not self._validate_metadata(fname, _exp_meta))):
                 self.Ckg_fid[j,i] = compute_lensing_Cell(self,'k',j,zmin,zmax)
                 self._savetxt(fname, self.Ckg_fid[j,i], extra={
                    'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
@@ -396,7 +402,7 @@ class fisherForecast(object):
                 fname= self.basedir+'output/'+self.name+'/derivatives_Cl/C'+name1+name2+ '_fid_'+str(round(100*zmin))+'_'+str(round(100*zmax))+'.txt'
                 _exp_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
                              'cosmo_params': self.params_fid, 'AP': self.AP}
-                if not exists(fname) or overwrite or not self._validate_metadata(fname, _exp_meta):
+                if not exists(fname) or (not no_overwrite and (overwrite or not self._validate_metadata(fname, _exp_meta))):
                    self.Cgg_fid[ind,i] = compute_lensing_Cell(self,j,k,zmin,zmax)
                    self._savetxt(fname, self.Cgg_fid[ind,i], extra={
                       'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
@@ -410,10 +416,13 @@ class fisherForecast(object):
                    self.Cgg_fid[ind,i] = np.genfromtxt(fname)
 
 
-   def compute_fiducial_Precon(self, overwrite=False):
+   def compute_fiducial_Precon(self, overwrite=False, no_overwrite=False):
       '''
       Either compute or load reconstructed power spectra
       '''
+      if no_overwrite and overwrite:
+         print("Warning: no_overwrite and overwrite both set; no_overwrite takes precedence.")
+         overwrite = False
       
       if isinstance(self.experiment.b,list):nsamples = len(self.experiment.b)
       else:nsamples=1
@@ -1325,11 +1334,14 @@ class fisherForecast(object):
     
 
    
-   def compute_derivatives(self, five_point=True, parameters=None, z=None, overwrite=False):
+   def compute_derivatives(self, five_point=True, parameters=None, z=None, overwrite=False, no_overwrite=False):
       '''
-      Calculates all the derivatives and saves them to the 
+      Calculates all the derivatives and saves them to the
       output/forecast name/derivatives directory
       '''
+      if no_overwrite and overwrite:
+         print("Warning: no_overwrite and overwrite both set; no_overwrite takes precedence.")
+         overwrite = False
       nsamples=len(self.experiment.b)
       npairs=int(nsamples*(nsamples+1)/2)
       
@@ -1349,7 +1361,7 @@ class fisherForecast(object):
                 fname = self.basedir+'output/'+self.name+folder+filename
                 _exp_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
                              'cosmo_params': self.params_fid, 'AP': self.AP, 'five_point': five_point}
-                if not exists(fname) or overwrite or not self._validate_metadata(fname, _exp_meta):
+                if not exists(fname) or (not no_overwrite and (overwrite or not self._validate_metadata(fname, _exp_meta))):
                    dPdp = self.compute_dPdp(param=p,X=s1,Y=s2,z=z[i], five_point=five_point)
                    self._savetxt(fname, dPdp, extra={
                       'param': p, 'five_point': five_point,
@@ -1422,7 +1434,7 @@ class fisherForecast(object):
          _sc_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
                      'cosmo_params': self.params_fid, 'AP': self.AP,
                      'step': float(step), 'five_point': five_point}
-         if not overwrite and all(exists(f) for f in _all_fnames) and all(self._validate_metadata(f, _sc_meta) for f in _all_fnames):
+         if not overwrite and all(exists(f) for f in _all_fnames) and (no_overwrite or all(self._validate_metadata(f, _sc_meta) for f in _all_fnames)):
             continue
 
          # Run CLASS once per stencil point; store plin, AP scalars, and f for all z.  Total CLASS calls: 4 (or 2).
@@ -1466,7 +1478,7 @@ class fisherForecast(object):
                _fm = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
                       'cosmo_params': self.params_fid, 'AP': self.AP,
                       'step': float(step), 'five_point': five_point}
-               if exists(fname) and not overwrite and self._validate_metadata(fname, _fm):
+               if exists(fname) and (no_overwrite or (not overwrite and self._validate_metadata(fname, _fm))):
                   continue
 
                P = {key: compute_tracer_power_spectrum(self, s1, s2, z,
@@ -1526,7 +1538,7 @@ class fisherForecast(object):
                fname = self.basedir+'output/'+self.name+folder+filename
                _exp_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
                             'cosmo_params': self.params_fid, 'AP': self.AP, 'five_point': five_point}
-               if not exists(fname) or overwrite or not self._validate_metadata(fname, _exp_meta):
+               if not exists(fname) or (not no_overwrite and (overwrite or not self._validate_metadata(fname, _exp_meta))):
                   dPdp = self.compute_dPdp(param=free_param,X=s1,Y=s2, z=z, five_point=five_point)
                   self._savetxt(fname, dPdp, extra={
                      'param': free_param, 'five_point': five_point,
@@ -1536,11 +1548,14 @@ class fisherForecast(object):
                   continue
        
     
-   def compute_Cl_derivatives(self, five_point=True, overwrite=False):
+   def compute_Cl_derivatives(self, five_point=True, overwrite=False, no_overwrite=False):
       '''
       Calculates the derivatives of Ckk, Ckg, and Cgg with respect to
       each of the free_params.
       '''
+      if no_overwrite and overwrite:
+         print("Warning: no_overwrite and overwrite both set; no_overwrite takes precedence.")
+         overwrite = False
       nsamples = len(self.experiment.b)
       npairs = int(nsamples*(nsamples+1)/2)
       zs = self.experiment.zedges
@@ -1607,7 +1622,7 @@ class fisherForecast(object):
          _sc_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
                      'cosmo_params': self.params_fid, 'AP': self.AP,
                      'step': float(step), 'five_point': five_point}
-         if not overwrite and all(exists(f) for f in all_fnames) and all(self._validate_metadata(f, _sc_meta) for f in all_fnames):
+         if not overwrite and all(exists(f) for f in all_fnames) and (no_overwrite or all(self._validate_metadata(f, _sc_meta) for f in all_fnames)):
             continue
 
          # Run CLASS stencil: one compute() per stencil point, evaluate all Cell types
@@ -1652,7 +1667,7 @@ class fisherForecast(object):
          _ckk_exp = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
                      'cosmo_params': self.params_fid, 'AP': self.AP,
                      'step': float(step), 'five_point': five_point}
-         if not exists(ckk_fname) or overwrite or not self._validate_metadata(ckk_fname, _ckk_exp):
+         if not exists(ckk_fname) or (not no_overwrite and (overwrite or not self._validate_metadata(ckk_fname, _ckk_exp))):
             result = stencil_formula(stencil_cell, 'kk', step, five_point)
             if flag: result *= self.params['A_s']
             self._savetxt(ckk_fname, result, extra={
@@ -1674,7 +1689,7 @@ class fisherForecast(object):
                name1 = self.experiment.samples[s1]
                name2 = self.experiment.samples[s2]
                fname = deriv_dir+'C'+name1+name2+'_'+free_param+'_'+zstr+'.txt'
-               if not exists(fname) or overwrite or not self._validate_metadata(fname, _cgg_exp):
+               if not exists(fname) or (not no_overwrite and (overwrite or not self._validate_metadata(fname, _cgg_exp))):
                   result = stencil_formula(stencil_cell, (i, j, 'gg'), step, five_point)
                   if flag: result *= self.params['A_s']
                   self._savetxt(fname, result, extra={
@@ -1687,7 +1702,7 @@ class fisherForecast(object):
             for j in range(nsamples):
                name1 = self.experiment.samples[j]
                fname = deriv_dir+'Ck'+name1+'_'+free_param+'_'+zstr+'.txt'
-               if not exists(fname) or overwrite or not self._validate_metadata(fname, _cgg_exp):
+               if not exists(fname) or (not no_overwrite and (overwrite or not self._validate_metadata(fname, _cgg_exp))):
                   result = stencil_formula(stencil_cell, (i, j, 'kg'), step, five_point)
                   if flag: result *= self.params['A_s']
                   self._savetxt(fname, result, extra={
@@ -1708,14 +1723,14 @@ class fisherForecast(object):
                        'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)]}
          if free_param != 'gamma':
             fname = deriv_dir+'Ckk_'+free_param+'.txt'
-            if not exists(fname) or overwrite or not self._validate_metadata(fname, _ckk_exp):
+            if not exists(fname) or (not no_overwrite and (overwrite or not self._validate_metadata(fname, _ckk_exp))):
                dCdp = self.compute_dCdp(free_param, 'k', 'k', five_point=five_point)
                self._savetxt(fname, dCdp, extra=_ckk_extra)
          else:
             for i, z in enumerate(zs[:-1]):
                filename = 'Ckk_'+free_param+'_'+str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))+'.txt'
                fname = deriv_dir+filename
-               if not exists(fname) or overwrite or not self._validate_metadata(fname, _ckk_exp):
+               if not exists(fname) or (not no_overwrite and (overwrite or not self._validate_metadata(fname, _ckk_exp))):
                   dCdp = self.compute_dCdp(free_param, 'k', 'k', zmin=zs[i], zmax=zs[i+1], five_point=five_point)
                   self._savetxt(fname, dCdp, extra=_ckk_extra)
          for i, z in enumerate(zs[:-1]):
@@ -1728,7 +1743,7 @@ class fisherForecast(object):
                name2 = self.experiment.samples[s2]
                filename = 'C'+name1+name2+'_'+free_param+'_'+str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))+'.txt'
                fname = deriv_dir+filename
-               if not exists(fname) or overwrite or not self._validate_metadata(fname, _cgg_exp):
+               if not exists(fname) or (not no_overwrite and (overwrite or not self._validate_metadata(fname, _cgg_exp))):
                   dCdp = self.compute_dCdp(free_param, s1, s2, zmin=zs[i], zmax=zs[i+1], five_point=five_point)
                   self._savetxt(fname, dCdp, extra={
                      'param': free_param, 'five_point': five_point,
@@ -1739,7 +1754,7 @@ class fisherForecast(object):
                   name1 = self.experiment.samples[j]
                   filename = 'Ck'+name1+'_'+free_param+'_'+str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))+'.txt'
                   fname = deriv_dir+filename
-                  if not exists(fname) or overwrite or not self._validate_metadata(fname, _cgg_exp):
+                  if not exists(fname) or (not no_overwrite and (overwrite or not self._validate_metadata(fname, _cgg_exp))):
                      dCdp = self.compute_dCdp(free_param, 'k', j, zmin=zs[i], zmax=zs[i+1], five_point=five_point)
                      self._savetxt(fname, dCdp, extra={
                         'param': free_param, 'five_point': five_point,
