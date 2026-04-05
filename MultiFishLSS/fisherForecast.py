@@ -4,11 +4,19 @@ from twoPoint import *
 from twoPointNoise import *
 from multiprocessing import Pool
 from functools import partial
-import os, json
+import os, json, datetime, math
 from os.path import exists
 from scipy.integrate import simpson as simps
 from scipy.special import legendre
 import matplotlib.pyplot as plt
+
+
+class _NumpyEncoder(json.JSONEncoder):
+   def default(self, obj):
+      if isinstance(obj, np.integer): return int(obj)
+      if isinstance(obj, np.floating): return float(obj)
+      if isinstance(obj, np.ndarray): return obj.tolist()
+      return super().default(obj)
 
 
 class fisherForecast(object):
@@ -225,7 +233,66 @@ class fisherForecast(object):
       self.Da_fid = interp1d(zs,Da_fid,kind='linear')
       self.Hz_fid = interp1d(zs,Hz_fid,kind='linear')
 
-        
+
+   def _base_metadata(self, extra=None):
+      '''Return metadata dict common to all saved files.'''
+      meta = {
+         'timestamp': datetime.datetime.now().isoformat(),
+         'kmin': self.kmin,
+         'kmax': self.kmax,
+         'Nk': self.Nk,
+         'Nmu': self.Nmu,
+         'cosmo_params': dict(self.params_fid),
+         'AP': bool(self.AP),
+      }
+      if extra:
+         meta.update(extra)
+      return meta
+
+   def _savetxt(self, fname, arr, extra=None):
+      '''np.savetxt with JSON metadata embedded as a header comment.'''
+      header = json.dumps(self._base_metadata(extra), cls=_NumpyEncoder)
+      np.savetxt(fname, arr, header=header)
+
+   def _validate_metadata(self, fname, expected_meta):
+      '''
+      Read the JSON header from fname and compare against expected_meta.
+      Returns True if the file is valid (or has no parseable header), False if stale.
+      Only checks keys present in both stored and expected_meta.
+      '''
+      try:
+         with open(fname) as _f:
+            first_line = _f.readline()
+         if not first_line.startswith('# {'):
+            return True
+         stored = json.loads(first_line[2:].strip())
+      except Exception:
+         return True
+
+      def _close(a, b):
+         try: return math.isclose(float(a), float(b), rel_tol=1e-9)
+         except: return str(a) == str(b)
+
+      for key in ('kmin', 'kmax'):
+         if key in expected_meta and key in stored:
+            if not _close(expected_meta[key], stored[key]): return False
+      for key in ('Nk', 'Nmu'):
+         if key in expected_meta and key in stored:
+            if int(expected_meta[key]) != int(stored[key]): return False
+      for key in ('AP', 'five_point'):
+         if key in expected_meta and key in stored:
+            if bool(expected_meta[key]) != bool(stored[key]): return False
+      if 'step' in expected_meta and 'step' in stored:
+         if not _close(expected_meta['step'], stored['step']): return False
+      if 'ell_mult' in expected_meta and 'ell_mult' in stored:
+         if expected_meta['ell_mult'] != stored['ell_mult']: return False
+      if 'cosmo_params' in expected_meta and 'cosmo_params' in stored:
+         for k, v in expected_meta['cosmo_params'].items():
+            if k not in stored['cosmo_params']: return False
+            if not _close(v, stored['cosmo_params'][k]): return False
+      return True
+
+
    def compute_fiducial_Pk(self, overwrite=False,ell_mult = None):
       '''
       Either compute or load fiducial full-shape power spectra
@@ -248,9 +315,18 @@ class fisherForecast(object):
                  ind=self.sample2index(j,k)
                  # P(k)
                  fname = self.basedir+'output/'+self.name+'/derivatives/pfid_'+samplename1+samplename2+'_'+str(round(100*z))+'.txt'
-                 if not exists(fname) or overwrite:  
+                 _exp_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
+                              'cosmo_params': self.params_fid, 'AP': self.AP, 'ell_mult': ell_mult}
+                 if not exists(fname) or overwrite or not self._validate_metadata(fname, _exp_meta):
                     self.P_fid[ind,i,:] = compute_tracer_power_spectrum(self,j,k,z,ell_mult=ell_mult)
-                    np.savetxt(fname,self.P_fid[ind,i,:])
+                    self._savetxt(fname, self.P_fid[ind,i,:], extra={
+                       'ell_mult': ell_mult,
+                       'bias_fid': [float(compute_b(self,z,j)), float(compute_b(self,z,k))],
+                       'n_fid': [float(compute_n(self,z,j)), float(compute_n(self,z,k))],
+                       'b2_fid': [float(self.experiment.b2[j](z)), float(self.experiment.b2[k](z))],
+                       'alpha0_fid': [float(self.experiment.alpha0[j](z)), float(self.experiment.alpha0[k](z))],
+                       'bpoly': get_biaspoly(self, j, k, z).tolist(),
+                    })
                  else:
                     self.P_fid[ind,i,:] = np.genfromtxt(fname)
             
@@ -278,10 +354,14 @@ class fisherForecast(object):
 
       # Ckk    
       fname = self.basedir+'output/'+self.name+'/derivatives_Cl/Ckk_fid.txt'
-      if not exists(fname) or overwrite:  
+      _exp_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
+                   'cosmo_params': self.params_fid, 'AP': self.AP}
+      if not exists(fname) or overwrite or not self._validate_metadata(fname, _exp_meta):
          #self.C_fid[0,:,:] = compute_lensing_Cell(self,'k','k')
          self.Ckk_fid = compute_lensing_Cell(self,'k','k')
-         np.savetxt(fname,self.Ckk_fid)
+         self._savetxt(fname, self.Ckk_fid, extra={
+            'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
+         })
       else:
          self.Ckk_fid = np.genfromtxt(fname)
          
@@ -294,10 +374,19 @@ class fisherForecast(object):
              name1=self.experiment.samples[j]
              # Ckg
              fname = self.basedir+'output/'+self.name+'/derivatives_Cl/Ck'+name1+'_fid_'+str(round(100*zmin))+'_'+str(round(100*zmax))+'.txt'
-             if not exists(fname) or overwrite:
+             _exp_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
+                          'cosmo_params': self.params_fid, 'AP': self.AP}
+             if not exists(fname) or overwrite or not self._validate_metadata(fname, _exp_meta):
                 self.Ckg_fid[j,i] = compute_lensing_Cell(self,'k',j,zmin,zmax)
-                np.savetxt(fname,self.Ckg_fid[j,i])
-             else: 
+                self._savetxt(fname, self.Ckg_fid[j,i], extra={
+                   'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
+                   'bias_fid': [float(compute_b(self, z, j))],
+                   'n_fid': [float(compute_n(self, z, j))],
+                   'b2_fid': [float(self.experiment.b2[j](z))],
+                   'alpha0_fid': [float(self.experiment.alpha0[j](z))],
+                   'bpoly': get_biaspoly(self, 'k', j, z).tolist(),
+                })
+             else:
                 self.Ckg_fid[j,i] = np.genfromtxt(fname)
              for k in range(nsamples):
                 if j>k:continue
@@ -305,9 +394,18 @@ class fisherForecast(object):
                 name2=self.experiment.samples[k]
                 ind=self.sample2index(j,k)
                 fname= self.basedir+'output/'+self.name+'/derivatives_Cl/C'+name1+name2+ '_fid_'+str(round(100*zmin))+'_'+str(round(100*zmax))+'.txt'
-                if not exists(fname) or overwrite:
+                _exp_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
+                             'cosmo_params': self.params_fid, 'AP': self.AP}
+                if not exists(fname) or overwrite or not self._validate_metadata(fname, _exp_meta):
                    self.Cgg_fid[ind,i] = compute_lensing_Cell(self,j,k,zmin,zmax)
-                   np.savetxt(fname,self.Cgg_fid[ind,i])
+                   self._savetxt(fname, self.Cgg_fid[ind,i], extra={
+                      'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
+                      'bias_fid': [float(compute_b(self, z, j)), float(compute_b(self, z, k))],
+                      'n_fid': [float(compute_n(self, z, j)), float(compute_n(self, z, k))],
+                      'b2_fid': [float(self.experiment.b2[j](z)), float(self.experiment.b2[k](z))],
+                      'alpha0_fid': [float(self.experiment.alpha0[j](z)), float(self.experiment.alpha0[k](z))],
+                      'bpoly': get_biaspoly(self, j, k, z).tolist(),
+                   })
                 else:
                    self.Cgg_fid[ind,i] = np.genfromtxt(fname)
 
@@ -338,7 +436,13 @@ class fisherForecast(object):
                      self.recon = True
                      self.P_recon_fid[ind,i,:] = compute_tracer_power_spectrum(self,j,k,z)
                      self.recon = False
-                     np.savetxt(fname,self.P_recon_fid[ind,i,:])
+                     self._savetxt(fname, self.P_recon_fid[ind,i,:], extra={
+                        'bias_fid': [float(compute_b(self,z,j)), float(compute_b(self,z,k))],
+                        'n_fid': [float(compute_n(self,z,j)), float(compute_n(self,z,k))],
+                        'b2_fid': [float(self.experiment.b2[j](z)), float(self.experiment.b2[k](z))],
+                        'alpha0_fid': [float(self.experiment.alpha0[j](z)), float(self.experiment.alpha0[k](z))],
+                        'bpoly': get_biaspoly(self, j, k, z).tolist(),
+                     })
                  else:
                      self.P_recon_fid[ind,i,:] = np.genfromtxt(fname)
          
@@ -1243,9 +1347,14 @@ class fisherForecast(object):
                 name2=self.experiment.samples[s2]
                 filename='P'+name1+name2+'_'+filename
                 fname = self.basedir+'output/'+self.name+folder+filename
-                if not exists(fname) or overwrite: 
+                _exp_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
+                             'cosmo_params': self.params_fid, 'AP': self.AP, 'five_point': five_point}
+                if not exists(fname) or overwrite or not self._validate_metadata(fname, _exp_meta):
                    dPdp = self.compute_dPdp(param=p,X=s1,Y=s2,z=z[i], five_point=five_point)
-                   np.savetxt(fname,dPdp)
+                   self._savetxt(fname, dPdp, extra={
+                      'param': p, 'five_point': five_point,
+                      'bpoly': get_biaspoly(self, s1, s2, z[i]).tolist(),
+                   })
                 else:
                    continue
          return
@@ -1310,7 +1419,10 @@ class fisherForecast(object):
             for j in range(npairs):
                s1, s2 = self.index2sample(j)
                _all_fnames.append(self.basedir+'output/'+self.name+folder+'P'+self.experiment.samples[s1]+self.experiment.samples[s2]+'_'+_base)
-         if not overwrite and all(exists(f) for f in _all_fnames):
+         _sc_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
+                     'cosmo_params': self.params_fid, 'AP': self.AP,
+                     'step': float(step), 'five_point': five_point}
+         if not overwrite and all(exists(f) for f in _all_fnames) and all(self._validate_metadata(f, _sc_meta) for f in _all_fnames):
             continue
 
          # Run CLASS once per stencil point; store plin, AP scalars, and f for all z.  Total CLASS calls: 4 (or 2).
@@ -1351,7 +1463,10 @@ class fisherForecast(object):
                elif free_param == 'A_log': base = 'A_log_'+str(int(100.*self.omega_log))+'_'+str(round(100*z))+'.txt'
                else: base = free_param+'_'+str(round(100*z))+'.txt'
                fname = self.basedir+'output/'+self.name+folder+'P'+self.experiment.samples[s1]+self.experiment.samples[s2]+'_'+base
-               if exists(fname) and not overwrite:
+               _fm = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
+                      'cosmo_params': self.params_fid, 'AP': self.AP,
+                      'step': float(step), 'five_point': five_point}
+               if exists(fname) and not overwrite and self._validate_metadata(fname, _fm):
                   continue
 
                P = {key: compute_tracer_power_spectrum(self, s1, s2, z,
@@ -1378,7 +1493,20 @@ class fisherForecast(object):
                   result -= K*(dapardp*MU**2 + daperpdp*(1.-MU**2))*self.dPdk(P_fid_jp)
 
                if flag: result *= self.params['A_s']
-               np.savetxt(fname, result)
+               _extra = {
+                  'param': free_param,
+                  'fiducial_value': default_value,
+                  'step': float(step),
+                  'relative_step': float(relative_step),
+                  'five_point': five_point,
+                  'bpoly': get_biaspoly(self, s1, s2, z).tolist(),
+               }
+               if self.fEDE != 0:
+                  _extra['EDE_params'] = {'fEDE': float(self.fEDE), 'thetai_scf': float(self.thetai_scf)}
+               if self.A_lin != 0 or self.A_log != 0:
+                  _extra['prim_features'] = {'phi_lin': float(self.phi_lin), 'A_log': float(self.A_log),
+                                             'omega_log': float(self.omega_log), 'phi_log': float(self.phi_log)}
+               self._savetxt(fname, result, extra=_extra)
 
       # -----------------------------------------------------------------------
       # All other params (bias, f_NL, special params, and all recon params)
@@ -1396,9 +1524,14 @@ class fisherForecast(object):
                name2=self.experiment.samples[s2]
                filename='P'+name1+name2+'_'+filename
                fname = self.basedir+'output/'+self.name+folder+filename
-               if not exists(fname) or overwrite:
+               _exp_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
+                            'cosmo_params': self.params_fid, 'AP': self.AP, 'five_point': five_point}
+               if not exists(fname) or overwrite or not self._validate_metadata(fname, _exp_meta):
                   dPdp = self.compute_dPdp(param=free_param,X=s1,Y=s2, z=z, five_point=five_point)
-                  np.savetxt(fname,dPdp)
+                  self._savetxt(fname, dPdp, extra={
+                     'param': free_param, 'five_point': five_point,
+                     'bpoly': get_biaspoly(self, s1, s2, z).tolist(),
+                  })
                else:
                   continue
        
@@ -1471,7 +1604,10 @@ class fisherForecast(object):
             for j in range(nsamples):
                name1 = self.experiment.samples[j]
                all_fnames.append(deriv_dir+'Ck'+name1+'_'+free_param+'_'+zstr+'.txt')
-         if not overwrite and all(exists(f) for f in all_fnames):
+         _sc_meta = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
+                     'cosmo_params': self.params_fid, 'AP': self.AP,
+                     'step': float(step), 'five_point': five_point}
+         if not overwrite and all(exists(f) for f in all_fnames) and all(self._validate_metadata(f, _sc_meta) for f in all_fnames):
             continue
 
          # Run CLASS stencil: one compute() per stencil point, evaluate all Cell types
@@ -1513,64 +1649,103 @@ class fisherForecast(object):
          self.cosmo.compute()
 
          # Save Ckk derivative
-         if not exists(ckk_fname) or overwrite:
+         _ckk_exp = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
+                     'cosmo_params': self.params_fid, 'AP': self.AP,
+                     'step': float(step), 'five_point': five_point}
+         if not exists(ckk_fname) or overwrite or not self._validate_metadata(ckk_fname, _ckk_exp):
             result = stencil_formula(stencil_cell, 'kk', step, five_point)
             if flag: result *= self.params['A_s']
-            np.savetxt(ckk_fname, result)
+            self._savetxt(ckk_fname, result, extra={
+               'param': free_param, 'fiducial_value': default_value,
+               'step': float(step), 'relative_step': float(relative_step),
+               'five_point': five_point,
+               'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
+            })
 
          # Save Cgg and Ckg derivatives
          for i in range(len(zs)-1):
             zstr = str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))
+            zmid = (zs[i] + zs[i+1]) / 2.
+            _cgg_exp = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
+                        'cosmo_params': self.params_fid, 'AP': self.AP,
+                        'step': float(step), 'five_point': five_point}
             for j in range(npairs):
                s1, s2 = self.index2sample(j)
                name1 = self.experiment.samples[s1]
                name2 = self.experiment.samples[s2]
                fname = deriv_dir+'C'+name1+name2+'_'+free_param+'_'+zstr+'.txt'
-               if not exists(fname) or overwrite:
+               if not exists(fname) or overwrite or not self._validate_metadata(fname, _cgg_exp):
                   result = stencil_formula(stencil_cell, (i, j, 'gg'), step, five_point)
                   if flag: result *= self.params['A_s']
-                  np.savetxt(fname, result)
+                  self._savetxt(fname, result, extra={
+                     'param': free_param, 'fiducial_value': default_value,
+                     'step': float(step), 'relative_step': float(relative_step),
+                     'five_point': five_point,
+                     'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
+                     'bpoly': get_biaspoly(self, s1, s2, zmid).tolist(),
+                  })
             for j in range(nsamples):
                name1 = self.experiment.samples[j]
                fname = deriv_dir+'Ck'+name1+'_'+free_param+'_'+zstr+'.txt'
-               if not exists(fname) or overwrite:
+               if not exists(fname) or overwrite or not self._validate_metadata(fname, _cgg_exp):
                   result = stencil_formula(stencil_cell, (i, j, 'kg'), step, five_point)
                   if flag: result *= self.params['A_s']
-                  np.savetxt(fname, result)
+                  self._savetxt(fname, result, extra={
+                     'param': free_param, 'fiducial_value': default_value,
+                     'step': float(step), 'relative_step': float(relative_step),
+                     'five_point': five_point,
+                     'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
+                     'bpoly': get_biaspoly(self, 'k', j, zmid).tolist(),
+                  })
 
       # -----------------------------------------------------------------------
       # All other params (bias, f_NL, gamma, ...): use compute_dCdp unchanged
       # -----------------------------------------------------------------------
       for free_param in _other:
+         _ckk_exp = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
+                     'cosmo_params': self.params_fid, 'AP': self.AP, 'five_point': five_point}
+         _ckk_extra = {'param': free_param, 'five_point': five_point,
+                       'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)]}
          if free_param != 'gamma':
             fname = deriv_dir+'Ckk_'+free_param+'.txt'
-            if not exists(fname) or overwrite:
+            if not exists(fname) or overwrite or not self._validate_metadata(fname, _ckk_exp):
                dCdp = self.compute_dCdp(free_param, 'k', 'k', five_point=five_point)
-               np.savetxt(fname, dCdp)
+               self._savetxt(fname, dCdp, extra=_ckk_extra)
          else:
             for i, z in enumerate(zs[:-1]):
                filename = 'Ckk_'+free_param+'_'+str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))+'.txt'
                fname = deriv_dir+filename
-               if not exists(fname) or overwrite:
+               if not exists(fname) or overwrite or not self._validate_metadata(fname, _ckk_exp):
                   dCdp = self.compute_dCdp(free_param, 'k', 'k', zmin=zs[i], zmax=zs[i+1], five_point=five_point)
-                  np.savetxt(fname, dCdp)
+                  self._savetxt(fname, dCdp, extra=_ckk_extra)
          for i, z in enumerate(zs[:-1]):
+            zmid = (zs[i] + zs[i+1]) / 2.
+            _cgg_exp = {'kmin': self.kmin, 'kmax': self.kmax, 'Nk': self.Nk, 'Nmu': self.Nmu,
+                        'cosmo_params': self.params_fid, 'AP': self.AP, 'five_point': five_point}
             for j in range(npairs):
                s1, s2 = self.index2sample(j)
                name1 = self.experiment.samples[s1]
                name2 = self.experiment.samples[s2]
                filename = 'C'+name1+name2+'_'+free_param+'_'+str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))+'.txt'
                fname = deriv_dir+filename
-               if not exists(fname) or overwrite:
+               if not exists(fname) or overwrite or not self._validate_metadata(fname, _cgg_exp):
                   dCdp = self.compute_dCdp(free_param, s1, s2, zmin=zs[i], zmax=zs[i+1], five_point=five_point)
-                  np.savetxt(fname, dCdp)
+                  self._savetxt(fname, dCdp, extra={
+                     'param': free_param, 'five_point': five_point,
+                     'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
+                     'bpoly': get_biaspoly(self, s1, s2, zmid).tolist(),
+                  })
                if j < nsamples:
                   name1 = self.experiment.samples[j]
                   filename = 'Ck'+name1+'_'+free_param+'_'+str(round(100*zs[i]))+'_'+str(round(100*zs[i+1]))+'.txt'
                   fname = deriv_dir+filename
-                  if not exists(fname) or overwrite:
+                  if not exists(fname) or overwrite or not self._validate_metadata(fname, _cgg_exp):
                      dCdp = self.compute_dCdp(free_param, 'k', j, zmin=zs[i], zmax=zs[i+1], five_point=five_point)
-                     np.savetxt(fname, dCdp)
+                     self._savetxt(fname, dCdp, extra={
+                        'param': free_param, 'five_point': five_point,
+                        'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
+                        'bpoly': get_biaspoly(self, 'k', j, zmid).tolist(),
+                     })
             
            
    def check_derivatives(self):
