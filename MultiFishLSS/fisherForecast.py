@@ -18,6 +18,11 @@ class _NumpyEncoder(json.JSONEncoder):
       if isinstance(obj, np.ndarray): return obj.tolist()
       return super().default(obj)
 
+_BPOLY_LABELS = ('1', '<b1>', 'b1^2', '<b2>', '<b1b2>', 'b2^2',
+                 '<bs>', '<b1bs>', '<b2bs>', 'bs^2',
+                 '<b3>', '<b1b3>',
+                 'alpha0', 'alpha2', 'alpha4', 'alpha6',
+                 'N', 'N2', 'N4')
 
 class fisherForecast(object):
    '''
@@ -251,8 +256,24 @@ class fisherForecast(object):
 
    def _savetxt(self, fname, arr, extra=None):
       '''np.savetxt with JSON metadata embedded as a header comment.'''
-      header = json.dumps(self._base_metadata(extra), cls=_NumpyEncoder)
-      np.savetxt(fname, arr, header=header)
+      meta = self._base_metadata(extra)
+      lines = [json.dumps(meta, cls=_NumpyEncoder)]
+      # Human-readable cosmo params row
+      cp = meta.get('cosmo_params', {})
+      if cp:
+         lines.append('cosmo_params: ' + '  '.join(f'{k}={v}' for k, v in cp.items()))
+      # Human-readable bpoly row (10 significant digits, with labels)
+      bpoly = meta.get('bpoly')
+      if bpoly is not None:
+         lines.append('bpoly: ' + '  '.join(f'{_BPOLY_LABELS[i]}={v:.10e}' for i, v in enumerate(bpoly)))
+      # Human-readable raw b and n rows
+      bias_fid = meta.get('bias_fid')
+      n_fid = meta.get('n_fid')
+      if bias_fid is not None:
+         lines.append('b_raw: ' + '  '.join(f'{v:.10e}' for v in bias_fid))
+      if n_fid is not None:
+         lines.append('n_raw: ' + '  '.join(f'{v:.10e}' for v in n_fid))
+      np.savetxt(fname, arr, header='\n'.join(lines))
 
    def _validate_metadata(self, fname, expected_meta):
       '''
@@ -1366,6 +1387,8 @@ class fisherForecast(object):
                    self._savetxt(fname, dPdp, extra={
                       'param': p, 'five_point': five_point,
                       'bpoly': get_biaspoly(self, s1, s2, z[i]).tolist(),
+                      'bias_fid': [float(compute_b(self, z[i], s1)), float(compute_b(self, z[i], s2))],
+                      'n_fid': [float(compute_n(self, z[i], s1)), float(compute_n(self, z[i], s2))],
                    })
                 else:
                    continue
@@ -1512,6 +1535,8 @@ class fisherForecast(object):
                   'relative_step': float(relative_step),
                   'five_point': five_point,
                   'bpoly': get_biaspoly(self, s1, s2, z).tolist(),
+                  'bias_fid': [float(compute_b(self, z, s1)), float(compute_b(self, z, s2))],
+                  'n_fid': [float(compute_n(self, z, s1)), float(compute_n(self, z, s2))],
                }
                if self.fEDE != 0:
                   _extra['EDE_params'] = {'fEDE': float(self.fEDE), 'thetai_scf': float(self.thetai_scf)}
@@ -1543,6 +1568,8 @@ class fisherForecast(object):
                   self._savetxt(fname, dPdp, extra={
                      'param': free_param, 'five_point': five_point,
                      'bpoly': get_biaspoly(self, s1, s2, z).tolist(),
+                     'bias_fid': [float(compute_b(self, z, s1)), float(compute_b(self, z, s2))],
+                     'n_fid': [float(compute_n(self, z, s1)), float(compute_n(self, z, s2))],
                   })
                else:
                   continue
@@ -1698,6 +1725,8 @@ class fisherForecast(object):
                      'five_point': five_point,
                      'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
                      'bpoly': get_biaspoly(self, s1, s2, zmid).tolist(),
+                     'bias_fid': [float(compute_b(self, zmid, s1)), float(compute_b(self, zmid, s2))],
+                     'n_fid': [float(compute_n(self, zmid, s1)), float(compute_n(self, zmid, s2))],
                   })
             for j in range(nsamples):
                name1 = self.experiment.samples[j]
@@ -1711,6 +1740,8 @@ class fisherForecast(object):
                      'five_point': five_point,
                      'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
                      'bpoly': get_biaspoly(self, 'k', j, zmid).tolist(),
+                     'bias_fid': [float(compute_b(self, zmid, j))],
+                     'n_fid': [float(compute_n(self, zmid, j))],
                   })
 
       # -----------------------------------------------------------------------
@@ -1749,6 +1780,8 @@ class fisherForecast(object):
                      'param': free_param, 'five_point': five_point,
                      'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
                      'bpoly': get_biaspoly(self, s1, s2, zmid).tolist(),
+                     'bias_fid': [float(compute_b(self, zmid, s1)), float(compute_b(self, zmid, s2))],
+                     'n_fid': [float(compute_n(self, zmid, s1)), float(compute_n(self, zmid, s2))],
                   })
                if j < nsamples:
                   name1 = self.experiment.samples[j]
@@ -1760,6 +1793,8 @@ class fisherForecast(object):
                         'param': free_param, 'five_point': five_point,
                         'ell_range': [int(self.ell[0]), int(self.ell[-1]), len(self.ell)],
                         'bpoly': get_biaspoly(self, 'k', j, zmid).tolist(),
+                        'bias_fid': [float(compute_b(self, zmid, j))],
+                        'n_fid': [float(compute_n(self, zmid, j))],
                      })
             
            
