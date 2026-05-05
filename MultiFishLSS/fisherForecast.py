@@ -832,7 +832,8 @@ class fisherForecast(object):
       if param == 'f_NL':
          result = 0.
 
-         D = 0.76 * self.cosmo.scale_independent_growth_factor(z) # normalized so D(a) = a in the MD era
+         D = self.cosmo.scale_independent_growth_factor(z) 
+         D *= (1./(1+29.))/self.cosmo.scale_independent_growth_factor(29.) # normalized so D(a) = a in the MD era
          # brute force way of getting the transfer function, normalized to 1 at kmin
          pmatter = compute_matter_power_spectrum(self, z, linear=True)
          T = np.sqrt(pmatter/self.k**self.params['n_s'])
