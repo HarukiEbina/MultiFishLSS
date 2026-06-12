@@ -1,7 +1,7 @@
 import numpy as np
 import os
 from scipy import special, optimize, integrate, stats
-from scipy.interpolate import UnivariateSpline, RectBivariateSpline, interp1d, interp2d, BarycentricInterpolator
+from scipy.interpolate import UnivariateSpline, RectBivariateSpline, interp1d, BarycentricInterpolator
 from time import time
 from timeit import timeit
 from copy import copy

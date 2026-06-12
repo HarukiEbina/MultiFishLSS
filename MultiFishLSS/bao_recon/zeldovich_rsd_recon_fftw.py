@@ -544,7 +544,9 @@ class Zeldovich_Recon:
                                                                     
             # do FFTLog
             ktemps, bias_ffts = self.sphs.sph(l, bias_integrands)
-            ret += interp1d(ktemps, bias_ffts)(k)
+            # bias_ffts has shape (1, Nk); index out the scalar so numpy >= 2
+            # accepts the single-element assignment in make_psstable
+            ret += interp1d(ktemps, bias_ffts)(k)[0]
 
         return 4*suppress*np.pi*ret
 
