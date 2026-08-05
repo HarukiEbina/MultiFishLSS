@@ -4,7 +4,7 @@ from twoPoint import *
 from twoPointNoise import *
 from multiprocessing import Pool
 from functools import partial
-import os, json
+import os, json, warnings
 from os.path import exists
 from scipy.integrate import simpson as simps
 from scipy.special import legendre
@@ -1798,6 +1798,19 @@ class fisherForecast(object):
       N = len(Fs)
       result = Fs[0]
       for i in range(1,N): result = self.combine_2fishers(result,Fs[i],globe)
+      # a Fisher matrix is positive (semi-)definite by construction, so a
+      # negative eigenvalue means the combined matrix is numerically corrupted
+      # and np.linalg.inv can silently return garbage (see N_Cl_fisher_issue.md).
+      evals = np.linalg.eigvalsh(result)
+      if evals.min() <= 0:
+         warnings.warn('combine_fishers: combined Fisher matrix is singular or '
+                       'indefinite (min eigenvalue = %.3e); np.linalg.inv results '
+                       'are untrustworthy. Check for parameters with ~zero '
+                       'derivatives (e.g. N in a C_ell-only basis).'%evals.min())
+      elif evals.max()/evals.min() > 1e14:
+         warnings.warn('combine_fishers: combined Fisher matrix is ill-conditioned '
+                       '(condition number ~ %.1e); marginalized errors from '
+                       'np.linalg.inv may be unreliable.'%(evals.max()/evals.min()))
       return result
 
 
@@ -1944,8 +1957,6 @@ class fisherForecast(object):
    def gen_lensing_fisher(self,basis,globe,ell_min=30,ell_max=None,kmax_knl=1,
                           CMB='SO',kk=True,only_kk=False,bins=None,fsky_CMB=0.4,
                           fsky_intersect=None,auto_only=False,nratio=1.,fskyratio=1.,no_kg=False):
-      '''
-      '''
       
       nsamples=len(self.experiment.b)
       npairs=int(nsamples*(nsamples+1)/2)

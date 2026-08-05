@@ -537,7 +537,7 @@ def compute_lensing_Cell(fishcast, X, Y, zmin=None, zmax=None,zmid=None,gamma=1.
    def Nz(z):
        if N_fid ==0: return N #any k case goes here
 #        if X=='k' or Y=='k': return forecast.experiment.alphak(z) * alpha0b/alpha0b_fid
-       return fishcast.experiment.fover[fishcast.sample2index(X,Y)]/np.sqrt(fishcast.experiment.n[X](z)*fishcast.experiment.n[Y](z))
+       return N/N_fid * fishcast.experiment.fover[fishcast.sample2index(X,Y)]/np.sqrt(fishcast.experiment.n[X](z)*fishcast.experiment.n[Y](z))
 
    # calculate P_XY
    if not noise:
