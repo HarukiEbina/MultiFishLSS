@@ -15,7 +15,7 @@ class DESI2024_Recon:
     arXiv:2402.14070v2. Generalised for multiple tracers by modifying the 
     Kaiser term to be 
     
-    (b_1 + fmu^2[1-S(k)]) x (b_2 + fmu^2[1-S(k)])
+    (b_1 + fmu^2[1-S(k)]) x (b_1 + fmu^2[1-S(k)])
 
     Which reduces to the standard Kaiser term for the auto-spectra. 
     

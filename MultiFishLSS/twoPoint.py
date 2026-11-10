@@ -33,35 +33,6 @@ def compute_n(fishcast, z,samplenumber=0):
    return fishcast.experiment.n[samplenumber](z)
    #return fishcast.experiment.n(z)
 
-def recon_efficiency(fishcast, z, n, ba, bb, f, k0=0.14, mu0=0.6):
-   """
-   Computes reconstruction efficiency according to 
-   "DESI and other Dark Energy experiments in the era of neutrino mass measurements"
-   By interpolating a table across x = n*P_g(k0,mu0)/0.1734.
-
-   Check how shotnoise is computed for cross spectra.
-   """
-   h = fishcast.cosmo.h()
-
-   Pg_k0 = fishcast.cosmo.pk_cb_lin(k0*h,z)*h**3.
-   Pg_k0_mu0 = (ba + f * mu0**2. ) * (bb + f * mu0**2.) * Pg_k0 
-
-   x = n * Pg_k0_mu0/0.1734 
-
-   if x > 10.:
-      return 0.5 
-   
-   elif x < 0.2:
-      return 1.
-
-   else:
-      rs = np.array([1.0, 0.9, 0.8, 0.7, 0.6, 0.55, 0.52, 0.5])
-      xs = np.array([0.2,0.3,0.5,1.,2.,3.,6.,10.])
-
-      r = interp1d(xs,rs,kind='linear',bounds_error=False, fill_value=(1.0, 0.5))
-
-      return r(x)
-   
 def compute_biaspoly(bvec1,bvec2,f=-1,fishcast=None):
     '''
     bvec=(b1,b2,bs,b3 ...,alpha0,alpha2,alpha4,alpha6,sn,sn2,sn4), biases are Lagrangian
@@ -302,7 +273,7 @@ def compute_tracer_power_spectrum(fishcast, Xind, Yind, z, b=-1., b2=-1, bs=-1,
       prim_feat_fac += A_log * np.sin(omega_log * np.log(klin*h/0.05)  + phi_log)
       plin *= prim_feat_fac
 
-      if fishcast.smooth: plin = get_smoothed_p(fishcast,z)
+      if fishcast.smooth: plin = get_smoothed_p(fishcast,klin,plin)
 
       if fishcast.linear2:
          print('forecast.linear2 deprecated')
@@ -598,13 +569,6 @@ def compute_recon_power_spectrum(fishcast,z,Xind, Yind, bpoly, moments, model_pa
       
    elif fishcast.recon_method == 'DESI2024':
 
-      ba = model_params['ba']
-      bb = model_params['bb']
-
-      n = np.sqrt(compute_n(fishcast,z,Xind) * compute_n(fishcast,z,Yind))
-
-      model_params['r'] = recon_efficiency(fishcast,z=z,n=n,ba=ba,bb=bb,f=model_params['f'])
-      
       sigmaS, sigmaPar, sigmaPerp = fishcast.compute_recon_sigmas(z, model_params)
 
       model_params['sigmaS'] = sigmaS

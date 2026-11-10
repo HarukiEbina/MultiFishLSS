@@ -93,6 +93,7 @@ class fisherForecast(object):
       self.fix_damping = fix_damping
       self.recon_sigmas = recon_sigmas
       self.sigmaS_default = sigmaS_default
+      self._Sigma_rec_sq_cache = {}
       self.ell = ell
       self.N2cut = N2cut
       self.basedir = basedir
@@ -334,10 +335,11 @@ class fisherForecast(object):
                  ind=self.sample2index(j,k)
                  # P(k)
                  fname = self.basedir+'output/'+self.name+'/derivatives_recon/pfid_'+samplename1+samplename2+'_'+str(round(100*z))+'.txt'
-                 if not exists(fname) or overwrite:  
+                 if not exists(fname) or overwrite:
+                     recon_was = self.recon
                      self.recon = True
                      self.P_recon_fid[ind,i,:] = compute_tracer_power_spectrum(self,j,k,z)
-                     self.recon = False
+                     self.recon = recon_was
                      np.savetxt(fname,self.P_recon_fid[ind,i,:])
                  else:
                      self.P_recon_fid[ind,i,:] = np.genfromtxt(fname)
@@ -689,6 +691,16 @@ class fisherForecast(object):
                    'f':-1, 'A_lin':self.A_lin, 'omega_lin':self.omega_lin, 'phi_lin':self.phi_lin,'A_log':self.A_log, 
                    'omega_log':self.omega_log,'phi_log':self.phi_log,'kIR':0.2,
                    'alpha_parallel': 1., 'alpha_perp': 1., 'ap_deriv': False}
+
+      # Add damping params to kwargs for marginalisation.
+      if self.recon and 'sigmaPerp' not in kwargs:
+         sigma_model_params = {'alpha_perp': None, 'alpha_parallel': None, 'ap_deriv': False,
+                               'sigmaS': None, 'sigmaPar': None, 'sigmaPerp': None,
+                               'f': f_fid, 'ba': ba_fid, 'bb': bb_fid}
+         sigmaS_fid, sigmaPar_fid, sigmaPerp_fid = self.compute_recon_sigmas(z, sigma_model_params)
+         kwargs['sigmaS'] = sigmaS_fid
+         kwargs['sigmaPar'] = sigmaPar_fid
+         kwargs['sigmaPerp'] = sigmaPerp_fid
 
       # if self.experiment.HI: kwargs['N'] = noise # ignores thermal HI noise in deriavtives
 
@@ -1731,6 +1743,33 @@ class fisherForecast(object):
 
       self.splines_array = arr
 
+   def compute_Sigma_rec_sq(self, z, smoothing_scale=15.0):
+      '''
+      Square of the post-reconstruction BAO damping scale Sigma_rec, following
+      the DESI 2024 reconstruction methodology, arXiv:2402.14070 Eq. 22:
+
+         Sigma_rec^2 = (2/3) \int dk/(2pi^2) (1-S(k))^2 P_lin(k,z) [1 - j0(k r_d)]
+
+      where S(k) = exp(-k^2 R^2 / 2) is the reconstruction smoothing kernel.
+      '''
+      key = (round(z, 4), round(smoothing_scale, 4))
+      if key in self._Sigma_rec_sq_cache:
+         return self._Sigma_rec_sq_cache[key]
+
+      h = self.cosmo.h()
+      k = np.logspace(np.log10(self.kmin), np.log10(self.kmax), self.Nk)
+      plin = np.array([self.cosmo.pk_cb_lin(kk * h, z) * h**3. for kk in k])
+
+      Sk = np.exp(-0.5 * (k * smoothing_scale)**2.)
+      rd = self.cosmo.rs_drag() * h # sound horizon
+      j0 = special.spherical_jn(0, k * rd)
+
+      integrand = plin * (1. - Sk)**2. * (1. - j0)
+      result = (2. / 3.) * simps(integrand, x=k) / (2. * np.pi**2.)
+
+      self._Sigma_rec_sq_cache[key] = result
+      return result
+
    def compute_recon_sigmas(self, z, model_params):
       """
       Compute the reconstruction sigmas (FOG damping, damping parallel to LoS, damping perpendicular to LoS).
@@ -1739,39 +1778,34 @@ class fisherForecast(object):
 
       If they are not provided but are specified when initialising the forecast, return those.
 
-      Else, compute the parameters according to 
+      Else, compute them from the post-reconstruction BAO damping scale of
+      arXiv:2402.14070 Eq. 22 (see compute_Sigma_rec_sq
 
-      \Sigma_\perp = r * \Sigma_{NL}(z=0) * D(z)
-      \Sigma_\par = (1 + f(z)) * \Sigma_\perp
+         \Sigma_\perp = \Sigma_rec(z)
+         \Sigma_\par  = \Sigma_\perp     (isotropic damping)
 
-      Where 
-
-      \Sigma_NL^2 = 1/(6pi^2) \int dk P_m(k)
-
-      And r = r(x) is computed in twoPoint.py according to 
-      "DESI and other Dark Energy experiments in the era of neutrino mass measurements", 
-      i.e. interpolating a table to account for the effect of shot noise on reconstruction.
+      Deviations from this value are absorbed by
+      marginalising over the sigma parameters with Gaussian priors.
       """
-      r = model_params['r']
       sigmaS = model_params['sigmaS']
       sigmaPar = model_params['sigmaPar']
       sigmaPerp = model_params['sigmaPerp']
-      f = model_params['f']
 
       if sigmaS is not None and sigmaPar is not None and sigmaPerp is not None:
          return sigmaS, sigmaPar, sigmaPerp
-      
+
       elif getattr(self, "recon_sigmas", None) is not None:
          sigmaS = sigmaS or self.recon_sigmas.get("sigmaS", None)
          sigmaPerp = sigmaPerp or self.recon_sigmas.get("sigmaPerp", None)
          sigmaPar = sigmaPar or self.recon_sigmas.get("sigmaPar", None)
-      
+
       else:
          sigmaS = sigmaS or self.sigmaS_default
-         sigmaNL = self.sigma_nl0 * self.cosmo.scale_independent_growth_factor(z) #np.sqrt(self.Sigma2(z))
-         
-         sigmaPerp = sigmaPerp or r * sigmaNL
-         sigmaPar = sigmaPar or (1. + f) * sigmaPerp
+
+         # arXiv:2402.14070 Eq. 22
+         Sigma_rec = np.sqrt(self.compute_Sigma_rec_sq(z))
+         sigmaPerp = sigmaPerp or Sigma_rec
+         sigmaPar = sigmaPar or sigmaPerp
 
       return sigmaS, sigmaPar, sigmaPerp
 
@@ -1834,10 +1868,14 @@ class fisherForecast(object):
 
    def gen_fisher(self,basis,globe,log10z_c=-1.,omega_lin=-1.,omega_log=-1.,kmax_knl=1.,
                   kmin=0.003,kmax=-10.,kpar_min=-1.,mu_min=-1,derivatives=None,
-                  zbins=None,marg_polys=True, marg_splines=True,spline_prior=1e4,simpson=False,nratio=1.,auto_only=False,fskyratio=1.):
+                  zbins=None,marg_polys=True, marg_splines=True,spline_prior=1e4,
+                  marg_sigmas=True,sigma_prior=2.,simpson=False,nratio=1.,auto_only=False,fskyratio=1.):
       '''
       Computes an array of Fisher matrices, one for each redshift bin.
       '''
+      if self.recon and self.recon_method == 'DESI2024':
+         print("BAO reconstruction using DESI2024 method - add damping parameters [SigmaPar, SigmaPerp, SigmaS] to marginalisation basis!")
+
       nsamples=len(self.experiment.b)
       npairs=int(nsamples*(nsamples+1)/2)
       if log10z_c == -1. : log10z_c = self.log10z_c
@@ -1884,6 +1922,13 @@ class fisherForecast(object):
          if use_splines and marg_splines:
             idx = np.arange(len(basis), n)
             F[idx, idx] += 1. / spline_prior**2
+
+         ## Gaussian priors on the BAO damping parameters sigmaPerp/sigmaPar
+
+         if marg_sigmas:
+            for i,p in enumerate(basis):
+               if p in ('sigmaPerp','sigmaPar'):
+                  F[i, i] += 1. / sigma_prior**2
 
          return F
 
